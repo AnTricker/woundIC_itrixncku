@@ -118,6 +118,7 @@ dmypy.json
 Wound_dataset/
 images/
 output/
+cla_gt/
 
 # Secret files
 secrets.*
