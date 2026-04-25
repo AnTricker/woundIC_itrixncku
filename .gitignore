@@ -1,0 +1,59 @@
+# Local environments
+.venv/
+venv/
+env/
+
+# OS and editor files
+.DS_Store
+.vscode/
+.idea/
+
+# Python cache and tooling
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# Secrets and local config
+.env
+.env.*
+!.env.example
+secrets/
+*.key
+*.pem
+*.p12
+*.crt
+credentials*.json
+service-account*.json
+token*.json
+
+# Data and experiment artifacts
+data/
+dataset/
+datasets/
+outputs/
+runs/
+logs/
+wandb/
+mlruns/
+
+# Models and checkpoints
+checkpoints/
+models/
+weights/
+*.pt
+*.pth
+*.ckpt
+*.safetensors
+*.onnx
+*.h5
+*.pkl
+*.joblib
+
+# Project-specific dataset metadata
+reference/*.csv
+!reference/*.md
