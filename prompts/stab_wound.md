@@ -1,0 +1,1 @@
+Analyze the entry wound's geometric shape (slit, star, or circular). Focus on the depth cues and the cleanliness of the puncture hole.

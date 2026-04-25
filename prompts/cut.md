@@ -1,0 +1,1 @@
+Analyze the linearity and edge alignment. Check if the cut is superficial or involves deeper dermal layers. Note any active serosanguinous fluid.
