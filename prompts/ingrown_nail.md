@@ -1,0 +1,1 @@
+Focus on the periungual area (nail fold). Describe the severity of erythema (redness) and the presence of any protruding granulation tissue.

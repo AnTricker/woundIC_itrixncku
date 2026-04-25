@@ -1,0 +1,1 @@
+Search for jagged, irregular tearing patterns. Identify "tissue bridging" and associated contusions around the tear margins.
