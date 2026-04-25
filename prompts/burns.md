@@ -1,0 +1,1 @@
+Identify the presence of blisters (bullae) and their clarity. Describe tissue texture: is it waxy, leathery (eschar), or erythematous (red)?

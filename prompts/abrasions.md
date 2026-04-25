@@ -1,0 +1,1 @@
+Focus on the extent of epidermal loss. Identify "strawberry" pinpoint bleeding and any embedded debris (dirt/grit). Describe the "friction pattern."

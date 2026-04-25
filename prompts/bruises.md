@@ -1,0 +1,1 @@
+Focus on the "chromatic spectrum." Analyze the transition of colors from center to periphery (purple, blue, yellow) to indicate the stage of bruising.
