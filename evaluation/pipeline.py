@@ -29,6 +29,7 @@ PROVIDERS = ("saas", "local")
 DEFAULT_OPENAI_MODEL = "gpt-4.1-mini"
 DEFAULT_GEMINI_MODEL = "gemini-2.5-flash"
 DEFAULT_ENV_FILE = BASE_DIR / ".env"
+DEFAULT_EXCLUDE_DIRS = "MM-SkinQA"
 
 
 def read_json(path: Path) -> dict[str, Any]:
@@ -83,14 +84,38 @@ def parse_json_text(text: str) -> dict[str, Any]:
         return json.loads(match.group(0))
 
 
-def iter_images(image_dir: Path) -> list[Path]:
+def parse_csv_set(value: str) -> set[str]:
+    return {part.strip() for part in value.split(",") if part.strip()}
+
+
+def iter_images(image_dir: Path, exclude_dirs: set[str] | None = None) -> list[Path]:
     if not image_dir.exists():
         return []
+    normalized_excludes = {normalize_category(item) for item in (exclude_dirs or set())}
     return sorted(
         path
         for path in image_dir.rglob("*")
         if path.is_file() and path.suffix.lower() in IMAGE_EXTENSIONS
+        and not any(normalize_category(part) in normalized_excludes for part in path.parts)
     )
+
+
+def normalize_category(value: str) -> str:
+    return value.strip().lower().replace("-", "_").replace(" ", "_")
+
+
+def infer_dataset_category(image_path: Path, image_dir: Path) -> str:
+    try:
+        relative = image_path.relative_to(image_dir)
+    except ValueError:
+        return prompt_runtime.infer_category(image_path)
+    if len(relative.parts) > 1:
+        return normalize_category(relative.parts[0])
+    return prompt_runtime.infer_category(image_path)
+
+
+def is_supported_category(category: str) -> bool:
+    return category in prompt_runtime.CATEGORY_PROMPTS
 
 
 def manifest_path(run_dir: Path) -> Path:
@@ -116,30 +141,68 @@ def write_manifest(run_dir: Path, rows: list[dict[str, Any]]) -> None:
             f.write(json.dumps(row, ensure_ascii=False) + "\n")
 
 
+def write_jsonl(path: Path, rows: list[dict[str, Any]]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("w", encoding="utf-8") as f:
+        for row in rows:
+            f.write(json.dumps(row, ensure_ascii=False) + "\n")
+
+
 def split_dataset(args: argparse.Namespace) -> None:
     image_dir = Path(args.image_dir)
     run_dir = Path(args.run_dir)
     if args.baseline_percent + args.inference_percent != 100:
         raise ValueError("--baseline-percent + --inference-percent must equal 100")
 
-    images = iter_images(image_dir)
+    exclude_dirs = parse_csv_set(args.exclude_dirs)
+    images = iter_images(image_dir, exclude_dirs)
     if not images:
         raise FileNotFoundError(f"No images found in {image_dir}")
 
     rng = random.Random(args.seed)
     by_category: dict[str, list[Path]] = defaultdict(list)
+    excluded_rows: list[dict[str, Any]] = []
     for image in images:
-        by_category[prompt_runtime.infer_category(image)].append(image)
+        category = infer_dataset_category(image, image_dir)
+        if is_supported_category(category):
+            by_category[category].append(image)
+        else:
+            excluded_rows.append(
+                {
+                    "image": str(image),
+                    "image_name": image.name,
+                    "category": category,
+                    "reason": "unsupported_category_prompt",
+                }
+            )
+
+    supported_total = sum(len(category_images) for category_images in by_category.values())
+    if not supported_total:
+        raise ValueError(
+            "No supported wound categories found. Expected folder names or filename "
+            f"prefixes matching: {', '.join(sorted(prompt_runtime.CATEGORY_PROMPTS))}"
+        )
+
+    total_baseline_count = round(supported_total * args.baseline_percent / 100)
+    baseline_counts: dict[str, int] = {}
+    fractional_parts: list[tuple[float, str]] = []
+    assigned = 0
+    for category, category_images in sorted(by_category.items()):
+        exact = len(category_images) * args.baseline_percent / 100
+        count = math.floor(exact)
+        baseline_counts[category] = count
+        assigned += count
+        fractional_parts.append((exact - count, category))
+
+    remaining = total_baseline_count - assigned
+    for _, category in sorted(fractional_parts, reverse=True)[:remaining]:
+        baseline_counts[category] += 1
 
     rows: list[dict[str, Any]] = []
     for category, category_images in sorted(by_category.items()):
         shuffled = category_images[:]
         rng.shuffle(shuffled)
-        baseline_count = round(len(shuffled) * args.baseline_percent / 100)
-        if args.baseline_percent > 0:
-            baseline_count = max(1, baseline_count)
-        if args.inference_percent > 0 and baseline_count == len(shuffled) and len(shuffled) > 1:
-            baseline_count -= 1
+        baseline_count = baseline_counts[category]
 
         for index, image in enumerate(shuffled):
             split = "baseline" if index < baseline_count else "inference"
@@ -154,7 +217,14 @@ def split_dataset(args: argparse.Namespace) -> None:
 
     rows.sort(key=lambda row: (row["split"], row["category"], row["image_name"]))
     write_manifest(run_dir, rows)
+    excluded_path = run_dir / "excluded_manifest.jsonl"
+    write_jsonl(excluded_path, excluded_rows)
     summary = Counter(row["split"] for row in rows)
+    category_counts = {
+        category: len(category_images)
+        for category, category_images in sorted(by_category.items())
+    }
+    excluded_counts = Counter(row["category"] for row in excluded_rows)
     write_json(
         run_dir / "split_summary.json",
         {
@@ -163,12 +233,21 @@ def split_dataset(args: argparse.Namespace) -> None:
             "baseline_percent": args.baseline_percent,
             "inference_percent": args.inference_percent,
             "seed": args.seed,
+            "exclude_dirs": sorted(exclude_dirs),
             "counts": dict(summary),
+            "category_counts": category_counts,
+            "excluded_counts": dict(excluded_counts),
             "total": len(rows),
+            "excluded_total": len(excluded_rows),
         },
     )
     print(f"Saved manifest: {manifest_path(run_dir)}")
+    print(f"Saved excluded manifest: {excluded_path}")
     print(f"Split counts: {dict(summary)}")
+    if exclude_dirs:
+        print(f"Excluded directories: {sorted(exclude_dirs)}")
+    if excluded_rows:
+        print(f"Excluded unsupported categories: {dict(excluded_counts)}")
 
 
 def output_path(run_dir: Path, provider: str, mode: str, image_path: Path) -> Path:
@@ -822,6 +901,11 @@ def parse_args() -> argparse.Namespace:
     split_parser.add_argument("--baseline-percent", type=int, required=True)
     split_parser.add_argument("--inference-percent", type=int, required=True)
     split_parser.add_argument("--seed", type=int, default=42)
+    split_parser.add_argument(
+        "--exclude-dirs",
+        default=DEFAULT_EXCLUDE_DIRS,
+        help="Comma-separated folder names to skip while scanning images.",
+    )
     split_parser.set_defaults(func=split_dataset)
 
     local_parser = subparsers.add_parser("generate-local")
@@ -857,6 +941,11 @@ def parse_args() -> argparse.Namespace:
     run_parser.add_argument("--baseline-percent", type=int, required=True)
     run_parser.add_argument("--inference-percent", type=int, required=True)
     run_parser.add_argument("--seed", type=int, default=42)
+    run_parser.add_argument(
+        "--exclude-dirs",
+        default=DEFAULT_EXCLUDE_DIRS,
+        help="Comma-separated folder names to skip while scanning images.",
+    )
     run_parser.add_argument("--local-splits", default="inference")
     run_parser.add_argument("--saas-splits", default="baseline,inference")
     run_parser.add_argument("--modes", default="simple,full")
