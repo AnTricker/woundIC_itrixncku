@@ -44,9 +44,18 @@ OPENAI_API_KEY=your_openai_api_key
 
 ### 1. Preprocessing: split dataset
 
-The split step scans an image directory, infers category from filename prefix, and writes a manifest. It does not copy images.
+The split step scans an image directory and writes a manifest. It does not copy images.
+
+Category inference:
+
+- Preferred: first folder under `--image-dir`, e.g. `images/Abrasions/xxx.jpg` -> `abrasions`.
+- Fallback: filename prefix for loose images directly under `--image-dir`.
+- `MM-SkinQA` is excluded by default because it is not part of the wound-class evaluation set.
+- Other unsupported folders are written to `excluded_manifest.jsonl` and skipped until a matching category prompt exists.
 
 `baseline_percent + inference_percent` must equal 100. The percentages control audit cost versus evaluation coverage, not model training.
+
+The split is exact at the whole-dataset level. For example, 10,000 images with `--baseline-percent 15` produces about 1,500 baseline images and 8,500 inference images. It does not force every category to contribute at least one baseline image, because datasets with many singleton filename-derived categories would otherwise overfill the baseline split.
 
 ```bash
 .venv/bin/python -m evaluation.pipeline split \
@@ -54,6 +63,7 @@ The split step scans an image directory, infers category from filename prefix, a
   --run-dir evaluation/runs/dev \
   --baseline-percent 20 \
   --inference-percent 80 \
+  --exclude-dirs MM-SkinQA \
   --seed 42
 ```
 
@@ -215,6 +225,7 @@ Use this when you want to inspect SaaS baseline quality before treating it as re
   --run-dir evaluation/runs/dev \
   --baseline-percent 20 \
   --inference-percent 80 \
+  --exclude-dirs MM-SkinQA \
   --seed 42 \
   --local-model qwen3.5 \
   --saas-provider gemini \
@@ -263,6 +274,7 @@ This is useful for smoke tests or once baseline quality is trusted:
   --run-dir evaluation/runs/dev \
   --baseline-percent 20 \
   --inference-percent 80 \
+  --exclude-dirs MM-SkinQA \
   --seed 42 \
   --local-model qwen3.5 \
   --saas-provider gemini \
