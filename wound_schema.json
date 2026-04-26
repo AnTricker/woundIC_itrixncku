@@ -1,0 +1,124 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Wound VLM Caption v2",
+  "type": "object",
+  "required": [
+    "image_observation",
+    "wound_features",
+    "category_specific_check",
+    "uncertainty",
+    "safety_scope"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "image_observation": {
+      "type": "object",
+      "required": [
+        "body_site",
+        "wound_presence",
+        "visual_summary",
+        "measurement_tool"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "body_site": { "type": "string" },
+        "wound_presence": {
+          "type": "string",
+          "enum": [
+            "open wound",
+            "closed discoloration",
+            "nail-fold lesion",
+            "unclear"
+          ]
+        },
+        "visual_summary": { "type": "string" },
+        "measurement_tool": {
+          "type": "object",
+          "required": ["visible", "description", "estimated_size"],
+          "additionalProperties": false,
+          "properties": {
+            "visible": { "type": "boolean" },
+            "description": { "type": ["string", "null"] },
+            "estimated_size": { "type": "string" }
+          }
+        }
+      }
+    },
+    "wound_features": {
+      "type": "object",
+      "required": [
+        "shape_pattern",
+        "edges_margins",
+        "wound_bed",
+        "color",
+        "texture",
+        "fluid_exudate_bleeding",
+        "periwound_skin",
+        "foreign_material_debris",
+        "necrosis_eschar"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "shape_pattern": { "type": "string" },
+        "edges_margins": { "type": "string" },
+        "wound_bed": { "type": "string" },
+        "color": { "type": "string" },
+        "texture": { "type": "string" },
+        "fluid_exudate_bleeding": { "type": "string" },
+        "periwound_skin": { "type": "string" },
+        "foreign_material_debris": {
+          "type": "string",
+          "enum": ["observed", "not observed", "uncertain"]
+        },
+        "necrosis_eschar": {
+          "type": "string",
+          "enum": ["observed", "not observed", "uncertain"]
+        }
+      }
+    },
+    "category_specific_check": {
+      "type": "object",
+      "required": [
+        "target_category",
+        "observed_supporting_features",
+        "expected_but_not_observed",
+        "differential_visual_conflicts"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "target_category": { "type": "string" },
+        "observed_supporting_features": {
+          "type": "array",
+          "items": { "type": "string" }
+        },
+        "expected_but_not_observed": {
+          "type": "array",
+          "items": { "type": "string" }
+        },
+        "differential_visual_conflicts": {
+          "type": "array",
+          "items": { "type": "string" }
+        }
+      }
+    },
+    "uncertainty": {
+      "type": "object",
+      "required": ["low_confidence_regions", "cannot_determine"],
+      "additionalProperties": false,
+      "properties": {
+        "low_confidence_regions": {
+          "type": "array",
+          "items": { "type": "string" }
+        },
+        "cannot_determine": {
+          "type": "array",
+          "items": { "type": "string" }
+        }
+      }
+    },
+    "safety_scope": {
+      "type": "string",
+      "const": "Visual description only; not a medical diagnosis."
+    }
+  }
+}

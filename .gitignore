@@ -1,8 +1,95 @@
+# Python cache and build artifacts
 # Python
 __pycache__/
 *.py[cod]
 *$py.class
+*.so
+.Python
+build/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
 *.egg-info/
+.installed.cfg
+*.egg
+MANIFEST
+
+# Virtual environments
+.venv/
+venv/
+env/
+ENV/
+env.bak/
+venv.bak/
+
+# Test, lint, and type-check caches
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.tox/
+.nox/
+.coverage
+.coverage.*
+htmlcov/
+coverage.xml
+*.cover
+.hypothesis/
+.cache/
+.dmypy.json
+dmypy.json
+.pyre/
+
+# Logs and temporary files
+*.log
+pip-log.txt
+pip-delete-this-directory.txt
+tmp/
+temp/
+
+# OS and editor files
+.DS_Store
+.vscode/
+.idea/
+.ipynb_checkpoints/
+.spyderproject
+.spyproject
+.ropeproject
+
+# Local config and secrets
+.env
+.env.*
+!.env.example
+secrets/
+secrets.*
+*.key
+*.pem
+*.p12
+*.crt
+credentials*.json
+service-account*.json
+token*.json
+config.json
+local_settings.py
+
+# App/db/build outputs
+db.sqlite3
+instance/
+.webassets-cache
+.scrapy/
+docs/_build/
+/site
+target/
+*.manifest
+*.spec
+
+# Data and experiment artifacts
 .egg
 
 # Environments
@@ -21,7 +108,31 @@ env/
 Wound_dataset/
 images/
 output/
+outputs/
+data/
+dataset/
+datasets/
+runs/
+logs/
+wandb/
+mlruns/
 cla_gt/
+
+# Models and checkpoints
+checkpoints/
+models/
+weights/
+*.pt
+*.pth
+*.ckpt
+*.safetensors
+*.onnx
+*.h5
+*.pkl
+*.joblib
+
+# Reference files: keep notes, ignore large/source datasets
+reference/
 
 # Secrets & config
 secrets.*

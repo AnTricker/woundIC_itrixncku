@@ -11,4 +11,4 @@ deploy的時候要先做 cla? Yes
 prompt生成：建立影像描述資料集 當作baseline
 可以先不用那麼嚴謹 這邊先求有
 
-需要翻譯成中文嗎？
+需要翻譯成中文嗎？==> if for mannual check
