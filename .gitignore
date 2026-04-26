@@ -1,15 +1,10 @@
-# Byte-compiled / optimized / DLL files
+# Python cache and build artifacts
 __pycache__/
 *.py[cod]
 *$py.class
-
-# C extensions
 *.so
-
-# Distribution / packaging
 .Python
 build/
-develop-eggs/
 dist/
 downloads/
 eggs/
@@ -25,137 +20,53 @@ wheels/
 *.egg
 MANIFEST
 
-# PyInstaller
-#  Usually these files are written by a python script from a template
-#  before PyInstaller builds the exe, so as to inject date/other infos into it.
-*.manifest
-*.spec
-
-# Installer logs
-pip-log.txt
-pip-delete-this-directory.txt
-
-# Unit test / coverage reports
-htmlcov/
-.tox/
-.nox/
-.coverage
-.coverage.*
-.cache
-nosetests.xml
-coverage.xml
-*.cover
-.hypothesis/
-.pytest_cache/
-
-# Translations
-*.mo
-*.pot
-
-# Django stuff:
-*.log
-local_settings.py
-db.sqlite3
-
-# Flask stuff:
-instance/
-.webassets-cache
-
-# Scrapy stuff:
-.scrapy
-
-# Sphinx documentation
-docs/_build/
-
-# PyBuilder
-target/
-
-# Jupyter Notebook
-.ipynb_checkpoints
-
-# IPython
-profile_default/
-ipython_config.py
-
-# pyenv
-.python-version
-
-# celery beat schedule file
-celerybeat-schedule
-
-# SageMath parsed files
-*.sage.py
-
-# Environments
-.env
-.venv
-env/
+# Virtual environments
+.venv/
 venv/
+env/
 ENV/
 env.bak/
 venv.bak/
 
-# Spyder project settings
-.spyderproject
-.spyproject
-
-# Rope project settings
-.ropeproject
-
-# mkdocs documentation
-/site
-
-# mypy
+# Test, lint, and type-check caches
+.pytest_cache/
 .mypy_cache/
+.ruff_cache/
+.tox/
+.nox/
+.coverage
+.coverage.*
+htmlcov/
+coverage.xml
+*.cover
+.hypothesis/
+.cache/
 .dmypy.json
 dmypy.json
-
-# Pyre type checker
 .pyre/
-
-# Project specific ignores
-# Data folders - do not upload datasets or images
-Wound_dataset/
-images/
-output/
-cla_gt/
-
-# Secret files
-secrets.*
-*.key
-*.pem
-config.json
-credentials.json
 
 # Logs and temporary files
 *.log
+pip-log.txt
+pip-delete-this-directory.txt
 tmp/
 temp/
-# Local environments
-.venv/
-venv/
-env/
 
 # OS and editor files
 .DS_Store
 .vscode/
 .idea/
+.ipynb_checkpoints/
+.spyderproject
+.spyproject
+.ropeproject
 
-# Python cache and tooling
-__pycache__/
-*.py[cod]
-*$py.class
-.pytest_cache/
-.mypy_cache/
-.ruff_cache/
-.coverage
-htmlcov/
-
-# Secrets and local config
+# Local config and secrets
 .env
 .env.*
 !.env.example
 secrets/
+secrets.*
 *.key
 *.pem
 *.p12
@@ -163,16 +74,33 @@ secrets/
 credentials*.json
 service-account*.json
 token*.json
+config.json
+local_settings.py
+
+# App/db/build outputs
+db.sqlite3
+instance/
+.webassets-cache
+.scrapy/
+docs/_build/
+/site
+target/
+*.manifest
+*.spec
 
 # Data and experiment artifacts
+Wound_dataset/
+images/
+output/
+outputs/
 data/
 dataset/
 datasets/
-outputs/
 runs/
 logs/
 wandb/
 mlruns/
+cla_gt/
 
 # Models and checkpoints
 checkpoints/
@@ -187,6 +115,5 @@ weights/
 *.pkl
 *.joblib
 
-# Project-specific dataset metadata
-reference/*.csv
-!reference/*.md
+# Reference files: keep notes, ignore large/source datasets
+reference/
