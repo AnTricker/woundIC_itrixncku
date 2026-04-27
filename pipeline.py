@@ -20,7 +20,7 @@ from jsonschema import Draft202012Validator
 import main as prompt_runtime
 
 
-BASE_DIR = Path(__file__).resolve().parents[1]
+BASE_DIR = Path(__file__).resolve().parent
 PROMPT_DIR = BASE_DIR / "prompts"
 SCHEMA_PATH = BASE_DIR / "wound_schema.json"
 IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".webp"}
@@ -148,11 +148,11 @@ def write_jsonl(path: Path, rows: list[dict[str, Any]]) -> None:
             f.write(json.dumps(row, ensure_ascii=False) + "\n")
 
 
-def split_dataset(args: argparse.Namespace) -> None:
+def prepare_dataset(args: argparse.Namespace) -> None:
     image_dir = Path(args.image_dir)
     run_dir = Path(args.run_dir)
-    if args.baseline_percent + args.inference_percent != 100:
-        raise ValueError("--baseline-percent + --inference-percent must equal 100")
+    if not 0 <= args.smoke_percent <= 100:
+        raise ValueError("--smoke-percent must be between 0 and 100")
 
     exclude_dirs = parse_csv_set(args.exclude_dirs)
     images = iter_images(image_dir, exclude_dirs)
@@ -183,43 +183,45 @@ def split_dataset(args: argparse.Namespace) -> None:
             f"prefixes matching: {', '.join(sorted(prompt_runtime.CATEGORY_PROMPTS))}"
         )
 
-    total_baseline_count = round(supported_total * args.baseline_percent / 100)
-    baseline_counts: dict[str, int] = {}
+    total_smoke_count = round(supported_total * args.smoke_percent / 100)
+    smoke_counts: dict[str, int] = {}
     fractional_parts: list[tuple[float, str]] = []
     assigned = 0
     for category, category_images in sorted(by_category.items()):
-        exact = len(category_images) * args.baseline_percent / 100
+        exact = len(category_images) * args.smoke_percent / 100
         count = math.floor(exact)
-        baseline_counts[category] = count
+        smoke_counts[category] = count
         assigned += count
         fractional_parts.append((exact - count, category))
 
-    remaining = total_baseline_count - assigned
+    remaining = total_smoke_count - assigned
     for _, category in sorted(fractional_parts, reverse=True)[:remaining]:
-        baseline_counts[category] += 1
+        smoke_counts[category] += 1
 
     rows: list[dict[str, Any]] = []
     for category, category_images in sorted(by_category.items()):
         shuffled = category_images[:]
         rng.shuffle(shuffled)
-        baseline_count = baseline_counts[category]
+        smoke_count = smoke_counts[category]
 
         for index, image in enumerate(shuffled):
-            split = "baseline" if index < baseline_count else "inference"
+            scopes = ["formal"]
+            if index < smoke_count:
+                scopes.append("smoke")
             rows.append(
                 {
                     "image": str(image),
                     "image_name": image.name,
                     "category": category,
-                    "split": split,
+                    "scopes": scopes,
                 }
             )
 
-    rows.sort(key=lambda row: (row["split"], row["category"], row["image_name"]))
+    rows.sort(key=lambda row: (row["category"], row["image_name"]))
     write_manifest(run_dir, rows)
     excluded_path = run_dir / "excluded_manifest.jsonl"
     write_jsonl(excluded_path, excluded_rows)
-    summary = Counter(row["split"] for row in rows)
+    summary = Counter(scope for row in rows for scope in row["scopes"])
     category_counts = {
         category: len(category_images)
         for category, category_images in sorted(by_category.items())
@@ -230,8 +232,7 @@ def split_dataset(args: argparse.Namespace) -> None:
         {
             "created_at": datetime.now().isoformat(timespec="seconds"),
             "image_dir": str(image_dir),
-            "baseline_percent": args.baseline_percent,
-            "inference_percent": args.inference_percent,
+            "smoke_percent": args.smoke_percent,
             "seed": args.seed,
             "exclude_dirs": sorted(exclude_dirs),
             "counts": dict(summary),
@@ -243,7 +244,7 @@ def split_dataset(args: argparse.Namespace) -> None:
     )
     print(f"Saved manifest: {manifest_path(run_dir)}")
     print(f"Saved excluded manifest: {excluded_path}")
-    print(f"Split counts: {dict(summary)}")
+    print(f"Scope counts: {dict(summary)}")
     if exclude_dirs:
         print(f"Excluded directories: {sorted(exclude_dirs)}")
     if excluded_rows:
@@ -426,7 +427,7 @@ def generate_one(
         "metadata": {
             "image": str(image_path),
             "image_name": row["image_name"],
-            "split": row["split"],
+            "scopes": row["scopes"],
             "raw_category": category,
             "target_category": caption.get("category_specific_check", {}).get(
                 "target_category", category
@@ -449,25 +450,25 @@ def generate_one(
 
 def selected_rows(
     rows: list[dict[str, Any]],
-    splits: set[str],
+    scopes: set[str],
     limit: int,
 ) -> list[dict[str, Any]]:
-    filtered = [row for row in rows if row["split"] in splits]
+    filtered = [row for row in rows if scopes.intersection(set(row.get("scopes", [])))]
     return filtered[:limit] if limit else filtered
 
 
-def split_arg(value: str) -> set[str]:
+def scope_arg(value: str) -> set[str]:
     parts = {part.strip() for part in value.split(",") if part.strip()}
-    invalid = parts - {"baseline", "inference"}
+    invalid = parts - {"smoke", "formal"}
     if invalid:
-        raise ValueError(f"Invalid split(s): {', '.join(sorted(invalid))}")
+        raise ValueError(f"Invalid scope(s): {', '.join(sorted(invalid))}")
     return parts
 
 
 def generate_outputs(args: argparse.Namespace) -> None:
     run_dir = Path(args.run_dir)
     rows = read_manifest(run_dir)
-    splits = split_arg(args.splits)
+    scopes = scope_arg(args.scopes)
     modes = tuple(args.modes.split(","))
     for mode in modes:
         if mode not in MODES:
@@ -483,11 +484,11 @@ def generate_outputs(args: argparse.Namespace) -> None:
 
     jobs = [
         (row, mode)
-        for row in selected_rows(rows, splits, args.limit)
+        for row in selected_rows(rows, scopes, args.limit)
         for mode in modes
     ]
     if not jobs:
-        print(f"No rows selected for splits={sorted(splits)}")
+        print(f"No rows selected for scopes={sorted(scopes)}")
         return
 
     def run_job(job: tuple[dict[str, Any], str]) -> tuple[Path, dict[str, Any]]:
@@ -684,7 +685,7 @@ def load_bundles(
     run_dir: Path,
     provider: str,
     mode: str,
-    splits: set[str] | None = None,
+    scopes: set[str] | None = None,
 ) -> dict[str, dict[str, Any]]:
     output_dir = run_dir / "outputs" / provider / mode
     if not output_dir.exists():
@@ -694,8 +695,8 @@ def load_bundles(
         if not path.is_file():
             continue
         bundle = read_json(path)
-        split = bundle.get("metadata", {}).get("split")
-        if splits is not None and split not in splits:
+        bundle_scopes = set(bundle.get("metadata", {}).get("scopes", []))
+        if scopes is not None and not scopes.intersection(bundle_scopes):
             continue
         bundles[path.stem] = bundle
     return bundles
@@ -779,13 +780,13 @@ def write_scores_md(run_dir: Path, scores: dict[str, Any]) -> None:
 
 def score_outputs(args: argparse.Namespace) -> None:
     run_dir = Path(args.run_dir)
-    score_splits = split_arg(args.score_splits)
-    reference_bundles = load_bundles(run_dir, "saas", args.reference_mode, score_splits)
+    score_scopes = scope_arg(args.score_scopes)
+    reference_bundles = load_bundles(run_dir, "saas", args.reference_mode, score_scopes)
     warnings = []
     if not reference_bundles:
         warnings.append(
             f"No SaaS reference outputs found for mode={args.reference_mode}, "
-            f"splits={sorted(score_splits)}. Run generate-saas on the same score split "
+            f"scopes={sorted(score_scopes)}. Run generate-saas on the same score scope "
             "before scoring semantic metrics."
         )
 
@@ -793,7 +794,7 @@ def score_outputs(args: argparse.Namespace) -> None:
         "created_at": datetime.now().isoformat(timespec="seconds"),
         "reference_provider": "saas",
         "reference_mode": args.reference_mode,
-        "score_splits": sorted(score_splits),
+        "score_scopes": sorted(score_scopes),
         "cells": {},
         "warnings": warnings,
     }
@@ -801,14 +802,14 @@ def score_outputs(args: argparse.Namespace) -> None:
     for provider in PROVIDERS:
         scores["cells"][provider] = {}
         for mode in MODES:
-            bundles = load_bundles(run_dir, provider, mode, score_splits)
+            bundles = load_bundles(run_dir, provider, mode, score_scopes)
             bundle_list = list(bundles.values())
             cell = dict(self_metrics(bundle_list))
             cell["vs_reference"] = paired_scores(bundles, reference_bundles)
             if provider == "local" and cell["count"] and not cell["vs_reference"]["paired_count"]:
                 warnings.append(
                     f"Local {mode} has {cell['count']} output(s), but none pair with SaaS "
-                    f"{args.reference_mode} reference on splits={sorted(score_splits)}."
+                    f"{args.reference_mode} reference on scopes={sorted(score_scopes)}."
                 )
             scores["cells"][provider][mode] = cell
             csv_rows.append(
@@ -834,12 +835,12 @@ def score_outputs(args: argparse.Namespace) -> None:
 def build_generate_args(
     args: argparse.Namespace,
     provider: str,
-    splits: str,
+    scopes: str,
 ) -> argparse.Namespace:
     return argparse.Namespace(
         run_dir=args.run_dir,
         provider=provider,
-        splits=splits,
+        scopes=scopes,
         modes=args.modes,
         local_model=args.local_model,
         saas_provider=args.saas_provider,
@@ -851,8 +852,8 @@ def build_generate_args(
 
 def generate_both(args: argparse.Namespace) -> None:
     tasks = [
-        build_generate_args(args, "local", args.local_splits),
-        build_generate_args(args, "saas", args.saas_splits),
+        build_generate_args(args, "local", args.local_scopes),
+        build_generate_args(args, "saas", args.saas_scopes),
     ]
     if args.parallel_providers:
         with concurrent.futures.ThreadPoolExecutor(max_workers=2) as executor:
@@ -865,11 +866,11 @@ def generate_both(args: argparse.Namespace) -> None:
 
 
 def run_all(args: argparse.Namespace) -> None:
-    split_dataset(args)
+    prepare_dataset(args)
     generate_both(args)
     if args.stop_before_score:
         print(
-            "Stopped before scoring. Review SaaS baseline/eval outputs, then run the score command."
+            "Stopped before scoring. Review SaaS/local outputs, then run the score command."
         )
         return
     score_outputs(args)
@@ -877,7 +878,7 @@ def run_all(args: argparse.Namespace) -> None:
 
 def add_common_generate_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--run-dir", required=True)
-    parser.add_argument("--splits", default="baseline")
+    parser.add_argument("--scopes", default="smoke")
     parser.add_argument("--modes", default="simple,full")
     parser.add_argument("--local-model", default="qwen3.5")
     parser.add_argument("--saas-provider", choices=["gemini", "openai"], default="gemini")
@@ -895,31 +896,42 @@ def parse_args() -> argparse.Namespace:
     )
     subparsers = parser.add_subparsers(dest="command", required=True)
 
-    split_parser = subparsers.add_parser("split")
-    split_parser.add_argument("--image-dir", required=True)
-    split_parser.add_argument("--run-dir", required=True)
-    split_parser.add_argument("--baseline-percent", type=int, required=True)
-    split_parser.add_argument("--inference-percent", type=int, required=True)
-    split_parser.add_argument("--seed", type=int, default=42)
-    split_parser.add_argument(
+    prepare_parser = subparsers.add_parser("prepare")
+    prepare_parser.add_argument("--image-dir", required=True)
+    prepare_parser.add_argument("--run-dir", required=True)
+    prepare_parser.add_argument("--smoke-percent", type=int, default=10)
+    prepare_parser.add_argument("--seed", type=int, default=42)
+    prepare_parser.add_argument(
         "--exclude-dirs",
         default=DEFAULT_EXCLUDE_DIRS,
         help="Comma-separated folder names to skip while scanning images.",
     )
-    split_parser.set_defaults(func=split_dataset)
+    prepare_parser.set_defaults(func=prepare_dataset)
+
+    split_parser = subparsers.add_parser("split")
+    split_parser.add_argument("--image-dir", required=True)
+    split_parser.add_argument("--run-dir", required=True)
+    split_parser.add_argument("--smoke-percent", type=int, default=10)
+    split_parser.add_argument("--seed", type=int, default=42)
+    split_parser.add_argument(
+        "--exclude-dirs",
+        default=DEFAULT_EXCLUDE_DIRS,
+        help="Deprecated alias for prepare. Comma-separated folder names to skip.",
+    )
+    split_parser.set_defaults(func=prepare_dataset)
 
     local_parser = subparsers.add_parser("generate-local")
     add_common_generate_args(local_parser)
-    local_parser.set_defaults(provider="local", splits="inference", func=generate_outputs)
+    local_parser.set_defaults(provider="local", scopes="smoke", func=generate_outputs)
 
     saas_parser = subparsers.add_parser("generate-saas")
     add_common_generate_args(saas_parser)
-    saas_parser.set_defaults(provider="saas", splits="baseline,inference", func=generate_outputs)
+    saas_parser.set_defaults(provider="saas", scopes="smoke", func=generate_outputs)
 
     generate_parser = subparsers.add_parser("generate")
     generate_parser.add_argument("--run-dir", required=True)
-    generate_parser.add_argument("--local-splits", default="inference")
-    generate_parser.add_argument("--saas-splits", default="baseline,inference")
+    generate_parser.add_argument("--local-scopes", default="smoke")
+    generate_parser.add_argument("--saas-scopes", default="smoke")
     generate_parser.add_argument("--modes", default="simple,full")
     generate_parser.add_argument("--local-model", default="qwen3.5")
     generate_parser.add_argument("--saas-provider", choices=["gemini", "openai"], default="gemini")
@@ -932,22 +944,21 @@ def parse_args() -> argparse.Namespace:
     score_parser = subparsers.add_parser("score")
     score_parser.add_argument("--run-dir", required=True)
     score_parser.add_argument("--reference-mode", choices=MODES, default="full")
-    score_parser.add_argument("--score-splits", default="inference")
+    score_parser.add_argument("--score-scopes", default="smoke")
     score_parser.set_defaults(func=score_outputs)
 
     run_parser = subparsers.add_parser("run-all")
     run_parser.add_argument("--image-dir", required=True)
     run_parser.add_argument("--run-dir", required=True)
-    run_parser.add_argument("--baseline-percent", type=int, required=True)
-    run_parser.add_argument("--inference-percent", type=int, required=True)
+    run_parser.add_argument("--smoke-percent", type=int, default=10)
     run_parser.add_argument("--seed", type=int, default=42)
     run_parser.add_argument(
         "--exclude-dirs",
         default=DEFAULT_EXCLUDE_DIRS,
         help="Comma-separated folder names to skip while scanning images.",
     )
-    run_parser.add_argument("--local-splits", default="inference")
-    run_parser.add_argument("--saas-splits", default="baseline,inference")
+    run_parser.add_argument("--local-scopes", default="smoke")
+    run_parser.add_argument("--saas-scopes", default="smoke")
     run_parser.add_argument("--modes", default="simple,full")
     run_parser.add_argument("--local-model", default="qwen3.5")
     run_parser.add_argument("--saas-provider", choices=["gemini", "openai"], default="gemini")
@@ -956,7 +967,7 @@ def parse_args() -> argparse.Namespace:
     run_parser.add_argument("--limit", type=int, default=0)
     run_parser.add_argument("--parallel-providers", action="store_true")
     run_parser.add_argument("--reference-mode", choices=MODES, default="full")
-    run_parser.add_argument("--score-splits", default="inference")
+    run_parser.add_argument("--score-scopes", default="smoke")
     run_parser.add_argument("--stop-before-score", action="store_true")
     run_parser.set_defaults(func=run_all)
 
