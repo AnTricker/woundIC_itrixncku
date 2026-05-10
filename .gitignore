@@ -1,4 +1,3 @@
-# Python cache and build artifacts
 # Python
 __pycache__/
 *.py[cod]
@@ -26,10 +25,8 @@ MANIFEST
 venv/
 env/
 ENV/
-env.bak/
-venv.bak/
 
-# Test, lint, and type-check caches
+# Test, lint, and coverage caches
 .pytest_cache/
 .mypy_cache/
 .ruff_cache/
@@ -46,13 +43,6 @@ coverage.xml
 dmypy.json
 .pyre/
 
-# Logs and temporary files
-*.log
-pip-log.txt
-pip-delete-this-directory.txt
-tmp/
-temp/
-
 # OS and editor files
 .DS_Store
 .vscode/
@@ -61,6 +51,11 @@ temp/
 .spyderproject
 .spyproject
 .ropeproject
+
+# Local agent / skills state
+.agents/
+.codex/
+skills-lock.json
 
 # Local config and secrets
 .env
@@ -78,40 +73,14 @@ token*.json
 config.json
 local_settings.py
 
-# App/db/build outputs
-db.sqlite3
-instance/
-.webassets-cache
-.scrapy/
-docs/_build/
-/site
-target/
-*.manifest
-*.spec
-
-# Data and experiment artifacts
-.egg
-
-# Environments
-.venv/
-venv/
-env/
-
-# IDE
-.vscode/
-.idea/
-
-# OS
-.DS_Store
-
-# Project data & outputs
+# Project data and generated outputs
 Wound_dataset/
 images/
-output/
-outputs/
 data/
 dataset/
 datasets/
+output/
+outputs/
 runs/
 logs/
 wandb/
@@ -131,17 +100,21 @@ weights/
 *.pkl
 *.joblib
 
-# Reference files: keep notes, ignore large/source datasets
+# App/db/build outputs
+db.sqlite3
+instance/
+.webassets-cache
+.scrapy/
+docs/_build/
+/site
+target/
+*.manifest
+*.spec
+
+# Reference files: keep notes in docs, ignore large/source reference datasets
 reference/
 
-# Secrets & config
-secrets.*
-*.key
-*.pem
-config.json
-credentials.json
-
-# Logs & temp
+# Temporary files
 *.log
 tmp/
 temp/
