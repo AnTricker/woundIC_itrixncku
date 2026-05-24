@@ -1,0 +1,2 @@
+- handwrite idea: {date}.md, only date number in filename
+- ai agent write: {date}{for what}.md, prefix in date number and needs to add this file is for what
