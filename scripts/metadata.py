@@ -21,6 +21,18 @@ def read_json(path: Path) -> dict[str, Any]:
     return json.loads(path.read_text(encoding="utf-8"))
 
 
+def ensure_under_run_dir(path: Path, run_dir: Path, label: str) -> Path:
+    resolved_path = path.resolve()
+    resolved_run_dir = run_dir.resolve()
+    try:
+        resolved_path.relative_to(resolved_run_dir)
+    except ValueError as exc:
+        raise ValueError(
+            f"{label} must be inside --run-dir. Got {path}; run_dir={run_dir}"
+        ) from exc
+    return path
+
+
 def fmt(value: Any, digits: int = 3) -> str:
     if value is None:
         return "not recorded"
@@ -172,17 +184,29 @@ def score_text(scores: dict[str, Any], provider: str, mode: str) -> str:
 
 def token_counts(record: dict[str, Any], provider: str, mode: str, output_count: int) -> tuple[str, str]:
     generation = record.get("generation", {}).get(provider, {})
-    if provider != "saas":
-        return "not recorded", "not recorded"
-    if mode == "full" and output_count == 0:
+    if output_count == 0:
         return "0", "0"
 
-    # Current 510 smoke run has SaaS simple only, so provider-level token totals
-    # map cleanly to the simple row. Future per-mode token fields can override it.
     by_mode = generation.get("by_mode", {}).get(mode, {})
-    input_tokens = by_mode.get("input_token_count", generation.get("input_token_count"))
-    output_tokens = by_mode.get("output_token_count", generation.get("output_token_count"))
+    input_tokens = by_mode.get("input_token_count")
+    output_tokens = by_mode.get("output_token_count")
+    if input_tokens is None and provider == "saas":
+        input_tokens = generation.get("input_token_count")
+    if output_tokens is None and provider == "saas":
+        output_tokens = generation.get("output_token_count")
     return fmt_int(input_tokens), fmt_int(output_tokens)
+
+
+def local_duration_metric(
+    provider: str,
+    provider_generation: dict[str, Any],
+    mode: str,
+    key: str,
+) -> str:
+    if provider == "saas":
+        return "not applicable (SaaS runs on provider infrastructure)"
+    value = provider_generation.get("by_mode", {}).get(mode, {}).get(key)
+    return fmt_seconds(value)
 
 
 def platform_text(provider: str, platform: dict[str, Any]) -> str:
@@ -217,18 +241,38 @@ def model_size_text(model: Any) -> str:
     return "not recorded"
 
 
-def output_runtime_metric(outputs: list[dict[str, Any]], keys: tuple[str, ...]) -> float | None:
-    values: list[float] = []
+def output_runtime_summary(outputs: list[dict[str, Any]], prefix: str) -> tuple[float | None, float | None]:
+    weighted_sum = 0.0
+    sample_count = 0
+    peaks: list[float] = []
     for output in outputs:
         metadata = output.get("metadata", {})
-        for key in keys:
-            value = metadata.get(key)
-            if isinstance(value, (int, float)):
-                values.append(float(value))
-                break
-    if not values:
-        return None
-    return max(values)
+        avg = metadata.get(f"{prefix}_avg")
+        count = metadata.get("runtime_gpu_sample_count", 0)
+        peak = metadata.get(f"{prefix}_peak")
+        if isinstance(avg, (int, float)) and isinstance(count, int) and count > 0:
+            weighted_sum += float(avg) * count
+            sample_count += count
+        if isinstance(peak, (int, float)):
+            peaks.append(float(peak))
+    avg_value = weighted_sum / sample_count if sample_count else None
+    peak_value = max(peaks) if peaks else None
+    return avg_value, peak_value
+
+
+def aggregate_runtime_summary(
+    provider_generation: dict[str, Any],
+    mode: str,
+    prefix: str,
+) -> tuple[float | None, float | None]:
+    mode_stats = provider_generation.get("by_mode", {}).get(mode, {})
+    sample_sum = mode_stats.get(f"{prefix}_sample_sum")
+    sample_count = mode_stats.get(f"{prefix}_sample_count")
+    peak = mode_stats.get(f"{prefix}_peak")
+    avg = None
+    if isinstance(sample_sum, (int, float)) and isinstance(sample_count, int) and sample_count > 0:
+        avg = float(sample_sum) / sample_count
+    return avg, peak if isinstance(peak, (int, float)) and peak > 0 else None
 
 
 def runtime_vram_text(
@@ -240,22 +284,17 @@ def runtime_vram_text(
     if provider == "saas":
         return "not applicable (SaaS runs on provider infrastructure)"
 
-    value = output_runtime_metric(
-        outputs,
-        (
-            "runtime_vram_used_gb",
-            "vram_used_gb",
-            "gpu_memory_used_gb",
-            "peak_vram_used_gb",
-        ),
-    )
-    if value is None:
-        value = nested_get(provider_generation, ("by_mode", mode, "runtime_vram_used_gb"))
-    if value is None:
-        value = nested_get(provider_generation, ("by_mode", mode, "peak_vram_used_gb"))
-    if value is None:
+    avg, peak = output_runtime_summary(outputs, "runtime_vram_used_gb")
+    if avg is None and peak is None:
+        avg, peak = aggregate_runtime_summary(provider_generation, mode, "runtime_vram_used_gb")
+    if avg is None and peak is None:
         return "not recorded; cannot be recovered after run"
-    return f"{float(value):.1f} GB"
+    parts = []
+    if avg is not None:
+        parts.append(f"avg {float(avg):.1f} GB")
+    if peak is not None:
+        parts.append(f"peak {float(peak):.1f} GB")
+    return "; ".join(parts)
 
 
 def runtime_gpu_usage_text(
@@ -267,22 +306,19 @@ def runtime_gpu_usage_text(
     if provider == "saas":
         return "not applicable (SaaS runs on provider infrastructure)"
 
-    value = output_runtime_metric(
-        outputs,
-        (
-            "runtime_gpu_utilization_percent",
-            "gpu_utilization_percent",
-            "gpu_usage_percent",
-            "peak_gpu_utilization_percent",
-        ),
-    )
-    if value is None:
-        value = nested_get(provider_generation, ("by_mode", mode, "runtime_gpu_utilization_percent"))
-    if value is None:
-        value = nested_get(provider_generation, ("by_mode", mode, "peak_gpu_utilization_percent"))
-    if value is None:
+    avg, peak = output_runtime_summary(outputs, "runtime_gpu_utilization_percent")
+    if avg is None and peak is None:
+        avg, peak = aggregate_runtime_summary(
+            provider_generation, mode, "runtime_gpu_utilization_percent"
+        )
+    if avg is None and peak is None:
         return "not recorded; cannot be calculated from existing output"
-    return fmt_percent(value)
+    parts = []
+    if avg is not None:
+        parts.append(f"avg {fmt_percent(avg)}")
+    if peak is not None:
+        parts.append(f"peak {fmt_percent(peak)}")
+    return "; ".join(parts)
 
 
 def dataset_split_text(split: dict[str, Any]) -> str:
@@ -315,7 +351,10 @@ def provider_notes(
         if mode == "full" and output_count == 0:
             notes.append("not run yet; same-mode full score cannot be calculated")
     else:
-        notes.append("local token / prefill / decode metrics are not recorded in current output files")
+        if generation.get("by_mode", {}).get(mode, {}).get("input_token_count") is None:
+            notes.append("local token / prefill / decode metrics were not recorded in this older run")
+        else:
+            notes.append("local token / prefill / decode metrics recorded from Ollama runtime response")
         if mode == "full":
             notes.append("SaaS full reference missing, so score is not official")
 
@@ -364,8 +403,8 @@ def build_metadata_rows(
                     input_tokens,
                     output_tokens,
                     fmt_seconds(duration),
-                    "not recorded",
-                    "not recorded",
+                    local_duration_metric(provider, provider_generation, mode, "prefill_duration_sec"),
+                    local_duration_metric(provider, provider_generation, mode, "decode_duration_sec"),
                     schema_quality(scores, provider, mode),
                     score_text(scores, provider, mode),
                     provider_notes(record, scores, provider, mode, output_count),
@@ -390,27 +429,27 @@ def build_summary(run_dir: Path) -> str:
         ["model type", "SaaS 或 local。"],
         ["model", "Gemini / Gemma / Qwen 等實際記錄到輸出檔或 experiment record 的模型名稱。"],
         ["model size / params", "模型參數量；Gemma 使用 Google 文件，Gemini 未公開則不推測。"],
-        ["prompt type", "simple / full / chain-style；目前 510 smoke 已記錄 simple 與 full。"],
+        ["prompt type", "simple / full / chain-style；依指定 run 實際已有的輸出列出。"],
         ["platform", "server / local / VM；目前以 experiment_record 的 machine 與 OS 表示。"],
         ["GPU capacity / total VRAM", "硬體規格，不是 runtime usage；pipeline 目前記錄 GPU 型號與總 VRAM。"],
-        ["runtime VRAM usage", "模型實際執行時使用的 VRAM；SaaS 不適用，local 目前未記錄。"],
-        ["runtime GPU usage", "模型實際執行時 GPU utilization；SaaS 不適用，local 目前未記錄，無法事後由輸出檔計算。"],
-        ["input token", "API 記錄到的輸入 token；目前只有 Gemini SaaS 有紀錄。"],
-        ["output token", "API 記錄到的輸出 token；目前只有 Gemini SaaS 有紀錄。"],
+        ["runtime VRAM usage", "模型實際執行時使用的 VRAM；SaaS 不適用；新 local run 由 pipeline 執行時記錄。"],
+        ["runtime GPU usage", "模型實際執行時 GPU utilization；SaaS 不適用；新 local run 由 pipeline 執行時記錄。"],
+        ["input token", "SaaS 使用 provider usage；新 local run 使用 Ollama `prompt_eval_count`。"],
+        ["output token", "SaaS 使用 provider usage；新 local run 使用 Ollama `eval_count`。"],
         ["duration time", "該列輸出檔 metadata 的 total_duration_sec 加總。"],
-        ["prefill time", "若 local runtime 已記錄才填；目前未記錄。"],
-        ["decode time", "若 local runtime 已記錄才填；目前未記錄。"],
+        ["prefill time", "新 local run 使用 Ollama `prompt_eval_duration` 記錄；SaaS 不適用。"],
+        ["decode time", "新 local run 使用 Ollama `eval_duration` 記錄；SaaS 不適用。"],
         ["output format quality", "JSON schema valid rate 與 required field completion rate。"],
         ["score 1-4", "四大文字相似度分數：BLEU-4、ROUGE-L、METEOR-lite、CIDEr-lite。"],
         ["備註", "錯誤、quota、異常狀況、manual review 狀態。"],
     ]
 
     lines = [
-        "# 523 Record Summary",
+        f"# {run_dir.name} Record Summary",
         "",
         f"Source run: `{run_dir}`",
         "",
-        "This file reorganizes the recorded 510 smoke-test metadata into report-ready tables.",
+        "This file reorganizes the specified run metadata into report-ready tables.",
         "",
         "## 1. 欄位說明",
         "",
@@ -482,16 +521,21 @@ def build_summary(run_dir: Path) -> str:
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Build 523 report-ready record tables.")
-    parser.add_argument("--run-dir", default="runs/510_smoke_v1")
-    parser.add_argument("--output", default="docs/523record_summary.md")
+    parser = argparse.ArgumentParser(description="Build run-specific report-ready record tables.")
+    parser.add_argument("--run-dir", required=True)
+    parser.add_argument(
+        "--output",
+        default=None,
+        help="Default: <run-dir>/<run-name>_record_summary.md",
+    )
     return parser.parse_args()
 
 
 def main() -> None:
     args = parse_args()
     run_dir = Path(args.run_dir)
-    output = Path(args.output)
+    output = Path(args.output) if args.output else run_dir / f"{run_dir.name}_record_summary.md"
+    ensure_under_run_dir(output, run_dir, "--output")
     content = build_summary(run_dir)
     output.parent.mkdir(parents=True, exist_ok=True)
     output.write_text(content, encoding="utf-8")

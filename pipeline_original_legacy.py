@@ -1,6 +1,7 @@
 import argparse
 import base64
 import concurrent.futures
+import csv
 import json
 import math
 import mimetypes
@@ -9,7 +10,6 @@ import platform
 import random
 import re
 import subprocess
-import threading
 import time
 from collections import Counter, defaultdict
 from datetime import datetime
@@ -33,7 +33,6 @@ DEFAULT_OPENAI_MODEL = "gpt-4.1-mini"
 DEFAULT_GEMINI_MODEL = "gemini-2.5-flash"
 DEFAULT_ENV_FILE = BASE_DIR / ".env"
 DEFAULT_EXCLUDE_DIRS = "MM-SkinQA"
-DEFAULT_SAAS_SIMPLE_BASELINE_DIR = BASE_DIR / "runs" / "saas_simple_baseline"
 DEFAULT_QUALITY_SCHEMA_MIN = 0.95
 DEFAULT_QUALITY_FIELD_MIN = 0.90
 DEFAULT_SAAS_LIMITS = {
@@ -74,7 +73,7 @@ def experiment_record_path(run_dir: Path) -> Path:
 
 
 def empty_generation_stats(provider: str, model: str, saas_provider: str | None) -> dict[str, Any]:
-    stats = {
+    return {
         "provider": provider,
         "saas_provider": saas_provider,
         "model": model,
@@ -92,15 +91,7 @@ def empty_generation_stats(provider: str, model: str, saas_provider: str | None)
         "total_token_count": 0,
         "input_text_token_count": 0,
         "input_image_token_count": 0,
-        "prefill_duration_sec": 0.0,
-        "decode_duration_sec": 0.0,
         "total_duration_sec": 0.0,
-        "runtime_vram_used_gb_sample_sum": 0.0,
-        "runtime_vram_used_gb_sample_count": 0,
-        "runtime_vram_used_gb_peak": 0.0,
-        "runtime_gpu_utilization_percent_sample_sum": 0.0,
-        "runtime_gpu_utilization_percent_sample_count": 0,
-        "runtime_gpu_utilization_percent_peak": 0.0,
         "by_mode": {
             mode: {
                 "output_count": 0,
@@ -108,28 +99,10 @@ def empty_generation_stats(provider: str, model: str, saas_provider: str | None)
                 "failure_count": 0,
                 "schema_valid_count": 0,
                 "total_duration_sec": 0.0,
-                "runtime_vram_used_gb_sample_sum": 0.0,
-                "runtime_vram_used_gb_sample_count": 0,
-                "runtime_vram_used_gb_peak": 0.0,
-                "runtime_gpu_utilization_percent_sample_sum": 0.0,
-                "runtime_gpu_utilization_percent_sample_count": 0,
-                "runtime_gpu_utilization_percent_peak": 0.0,
             }
             for mode in MODES
         },
     }
-    if provider == "local":
-        for mode_stats in stats["by_mode"].values():
-            mode_stats.update(
-                {
-                    "input_token_count": 0,
-                    "output_token_count": 0,
-                    "total_token_count": 0,
-                    "prefill_duration_sec": 0.0,
-                    "decode_duration_sec": 0.0,
-                }
-            )
-    return stats
 
 
 def merge_generation_stats(
@@ -145,16 +118,12 @@ def merge_generation_stats(
             for mode, mode_stats in value.items():
                 current = dict(by_mode.get(mode, {}))
                 for stat_key, stat_value in mode_stats.items():
-                    if isinstance(stat_value, (int, float)) and stat_key.endswith("_peak"):
-                        current[stat_key] = max(current.get(stat_key, 0), stat_value)
-                    elif isinstance(stat_value, (int, float)):
+                    if isinstance(stat_value, (int, float)):
                         current[stat_key] = current.get(stat_key, 0) + stat_value
                     else:
                         current[stat_key] = stat_value
                 by_mode[mode] = current
             provider_stats["by_mode"] = by_mode
-        elif isinstance(value, (int, float)) and key.endswith("_peak"):
-            provider_stats[key] = max(provider_stats.get(key, 0), value)
         elif isinstance(value, (int, float)):
             provider_stats[key] = provider_stats.get(key, 0) + value
         else:
@@ -195,47 +164,6 @@ def update_token_stats(stats: dict[str, Any] | None, usage: dict[str, Any]) -> N
             stats["input_image_token_count"] += token_count
 
 
-def ollama_response_value(response: Any, key: str, default: Any = 0) -> Any:
-    if isinstance(response, dict):
-        return response.get(key, default)
-    return getattr(response, key, default)
-
-
-def update_ollama_usage(usage: dict[str, Any] | None, response: Any) -> None:
-    if usage is None:
-        return
-    input_tokens = int(ollama_response_value(response, "prompt_eval_count", 0) or 0)
-    output_tokens = int(ollama_response_value(response, "eval_count", 0) or 0)
-    usage["input_token_count"] += input_tokens
-    usage["output_token_count"] += output_tokens
-    usage["total_token_count"] += input_tokens + output_tokens
-    usage["prefill_duration_sec"] += (
-        float(ollama_response_value(response, "prompt_eval_duration", 0) or 0) / 1_000_000_000
-    )
-    usage["decode_duration_sec"] += (
-        float(ollama_response_value(response, "eval_duration", 0) or 0) / 1_000_000_000
-    )
-
-
-def update_local_usage_stats_from_metadata(
-    stats: dict[str, Any],
-    mode: str,
-    metadata: dict[str, Any],
-) -> None:
-    mode_stats = stats["by_mode"][mode]
-    for key in (
-        "input_token_count",
-        "output_token_count",
-        "total_token_count",
-        "prefill_duration_sec",
-        "decode_duration_sec",
-    ):
-        value = metadata.get(key)
-        if isinstance(value, (int, float)):
-            stats[key] += value
-            mode_stats[key] += value
-
-
 def run_command(command: list[str]) -> tuple[int, str]:
     try:
         completed = subprocess.run(
@@ -248,128 +176,6 @@ def run_command(command: list[str]) -> tuple[int, str]:
     except (FileNotFoundError, subprocess.SubprocessError):
         return 1, ""
     return completed.returncode, completed.stdout.strip()
-
-
-def query_runtime_gpu_sample() -> dict[str, Any] | None:
-    code, output = run_command(
-        [
-            "nvidia-smi",
-            "--query-gpu=memory.used,utilization.gpu",
-            "--format=csv,noheader,nounits",
-        ]
-    )
-    if code != 0 or not output:
-        return None
-
-    vram_used_mb: list[float] = []
-    gpu_util_percent: list[float] = []
-    for line in output.splitlines():
-        parts = [part.strip() for part in line.split(",")]
-        if len(parts) < 2:
-            continue
-        try:
-            vram_used_mb.append(float(parts[0]))
-            gpu_util_percent.append(float(parts[1]))
-        except ValueError:
-            continue
-    if not vram_used_mb and not gpu_util_percent:
-        return None
-    return {
-        "vram_used_gb": sum(vram_used_mb) / 1024 if vram_used_mb else 0.0,
-        "gpu_utilization_percent": (
-            sum(gpu_util_percent) / len(gpu_util_percent) if gpu_util_percent else 0.0
-        ),
-        "gpu_count": max(len(vram_used_mb), len(gpu_util_percent)),
-    }
-
-
-class RuntimeGpuMonitor:
-    def __init__(self, interval_sec: float = 0.5) -> None:
-        self.interval_sec = interval_sec
-        self.samples: list[dict[str, Any]] = []
-        self._stop = threading.Event()
-        self._lock = threading.Lock()
-        self._thread: threading.Thread | None = None
-
-    def start(self) -> None:
-        sample = query_runtime_gpu_sample()
-        if sample is not None:
-            self.samples.append(sample)
-        self._thread = threading.Thread(target=self._sample_loop, daemon=True)
-        self._thread.start()
-
-    def _sample_loop(self) -> None:
-        while not self._stop.wait(self.interval_sec):
-            sample = query_runtime_gpu_sample()
-            if sample is None:
-                continue
-            with self._lock:
-                self.samples.append(sample)
-
-    def stop(self) -> dict[str, Any]:
-        self._stop.set()
-        if self._thread is not None:
-            self._thread.join(timeout=max(1.0, self.interval_sec * 2))
-        sample = query_runtime_gpu_sample()
-        if sample is not None:
-            with self._lock:
-                self.samples.append(sample)
-        with self._lock:
-            samples = list(self.samples)
-        if not samples:
-            return {
-                "runtime_gpu_monitoring": "unavailable",
-                "runtime_gpu_monitoring_source": "nvidia-smi",
-                "runtime_gpu_sample_count": 0,
-            }
-        vram_values = [float(sample["vram_used_gb"]) for sample in samples]
-        gpu_values = [float(sample["gpu_utilization_percent"]) for sample in samples]
-        return {
-            "runtime_gpu_monitoring": "recorded",
-            "runtime_gpu_monitoring_source": "nvidia-smi",
-            "runtime_gpu_sample_interval_sec": self.interval_sec,
-            "runtime_gpu_sample_count": len(samples),
-            "runtime_vram_used_gb_avg": sum(vram_values) / len(vram_values),
-            "runtime_vram_used_gb_peak": max(vram_values),
-            "runtime_gpu_utilization_percent_avg": sum(gpu_values) / len(gpu_values),
-            "runtime_gpu_utilization_percent_peak": max(gpu_values),
-            "runtime_gpu_count": max(int(sample.get("gpu_count", 0)) for sample in samples),
-        }
-
-
-def update_runtime_stats_from_metadata(
-    stats: dict[str, Any],
-    mode: str,
-    metadata: dict[str, Any],
-) -> None:
-    sample_count = metadata.get("runtime_gpu_sample_count", 0)
-    if not sample_count or metadata.get("runtime_gpu_monitoring") != "recorded":
-        return
-    vram_avg = metadata.get("runtime_vram_used_gb_avg", 0.0)
-    vram_peak = metadata.get("runtime_vram_used_gb_peak", 0.0)
-    gpu_avg = metadata.get("runtime_gpu_utilization_percent_avg", 0.0)
-    gpu_peak = metadata.get("runtime_gpu_utilization_percent_peak", 0.0)
-
-    mode_stats = stats["by_mode"][mode]
-    mode_stats["runtime_vram_used_gb_sample_sum"] += vram_avg * sample_count
-    mode_stats["runtime_vram_used_gb_sample_count"] += sample_count
-    mode_stats["runtime_vram_used_gb_peak"] = max(
-        mode_stats["runtime_vram_used_gb_peak"], vram_peak
-    )
-    mode_stats["runtime_gpu_utilization_percent_sample_sum"] += gpu_avg * sample_count
-    mode_stats["runtime_gpu_utilization_percent_sample_count"] += sample_count
-    mode_stats["runtime_gpu_utilization_percent_peak"] = max(
-        mode_stats["runtime_gpu_utilization_percent_peak"], gpu_peak
-    )
-
-    stats["runtime_vram_used_gb_sample_sum"] += vram_avg * sample_count
-    stats["runtime_vram_used_gb_sample_count"] += sample_count
-    stats["runtime_vram_used_gb_peak"] = max(stats["runtime_vram_used_gb_peak"], vram_peak)
-    stats["runtime_gpu_utilization_percent_sample_sum"] += gpu_avg * sample_count
-    stats["runtime_gpu_utilization_percent_sample_count"] += sample_count
-    stats["runtime_gpu_utilization_percent_peak"] = max(
-        stats["runtime_gpu_utilization_percent_peak"], gpu_peak
-    )
 
 
 def detect_gpu_info() -> dict[str, Any]:
@@ -767,17 +573,11 @@ def build_self_check_prompt(category: str, caption: dict[str, Any], vqa: dict[st
     )
 
 
-def call_ollama_json(
-    model: str,
-    prompt: str,
-    image_path: Path | None = None,
-    usage: dict[str, Any] | None = None,
-) -> dict[str, Any]:
+def call_ollama_json(model: str, prompt: str, image_path: Path | None = None) -> dict[str, Any]:
     message: dict[str, Any] = {"role": "user", "content": prompt}
     if image_path is not None:
         message["images"] = [str(image_path)]
     response = ollama.chat(model=model, format="json", messages=[message])
-    update_ollama_usage(usage, response)
     return parse_json_text(response["message"]["content"])
 
 
@@ -972,27 +772,34 @@ def generate_one(
     stats: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     started = time.monotonic()
-    gpu_monitor = RuntimeGpuMonitor() if provider == "local" else None
-    if gpu_monitor is not None:
-        gpu_monitor.start()
     image_path = Path(row["image"])
     category = row["category"]
-    local_usage = {
-        "input_token_count": 0,
-        "output_token_count": 0,
-        "total_token_count": 0,
-        "prefill_duration_sec": 0.0,
-        "decode_duration_sec": 0.0,
-    }
-    try:
-        caption_prompt = build_caption_prompt(category, mode)
+    caption_prompt = build_caption_prompt(category, mode)
+    if provider == "local":
+        caption = call_ollama_json(model, caption_prompt, image_path)
+    else:
+        caption = call_saas_json_with_retry(
+            saas_provider or provider,
+            model,
+            caption_prompt,
+            image_path,
+            request_delay_sec=request_delay_sec,
+            max_retries=max_retries,
+            backoff_base_sec=backoff_base_sec,
+            stats=stats,
+        )
+
+    vqa = None
+    self_check = None
+    if mode == "full":
+        vqa_prompt = build_vqa_prompt(category)
         if provider == "local":
-            caption = call_ollama_json(model, caption_prompt, image_path, local_usage)
+            vqa = call_ollama_json(model, vqa_prompt, image_path)
         else:
-            caption = call_saas_json_with_retry(
+            vqa = call_saas_json_with_retry(
                 saas_provider or provider,
                 model,
-                caption_prompt,
+                vqa_prompt,
                 image_path,
                 request_delay_sec=request_delay_sec,
                 max_retries=max_retries,
@@ -1000,63 +807,39 @@ def generate_one(
                 stats=stats,
             )
 
-        vqa = None
-        self_check = None
-        if mode == "full":
-            vqa_prompt = build_vqa_prompt(category)
-            if provider == "local":
-                vqa = call_ollama_json(model, vqa_prompt, image_path, local_usage)
-            else:
-                vqa = call_saas_json_with_retry(
-                    saas_provider or provider,
-                    model,
-                    vqa_prompt,
-                    image_path,
-                    request_delay_sec=request_delay_sec,
-                    max_retries=max_retries,
-                    backoff_base_sec=backoff_base_sec,
-                    stats=stats,
-                )
+        self_check_prompt = build_self_check_prompt(category, caption, vqa)
+        if provider == "local":
+            self_check = call_ollama_json(model, self_check_prompt)
+        else:
+            self_check = call_saas_json_with_retry(
+                saas_provider or provider,
+                model,
+                self_check_prompt,
+                None,
+                request_delay_sec=request_delay_sec,
+                max_retries=max_retries,
+                backoff_base_sec=backoff_base_sec,
+                stats=stats,
+            )
 
-            self_check_prompt = build_self_check_prompt(category, caption, vqa)
-            if provider == "local":
-                self_check = call_ollama_json(model, self_check_prompt, usage=local_usage)
-            else:
-                self_check = call_saas_json_with_retry(
-                    saas_provider or provider,
-                    model,
-                    self_check_prompt,
-                    None,
-                    request_delay_sec=request_delay_sec,
-                    max_retries=max_retries,
-                    backoff_base_sec=backoff_base_sec,
-                    stats=stats,
-                )
-
-        schema_errors = validate_caption(caption)
-    finally:
-        runtime_gpu_metadata = gpu_monitor.stop() if gpu_monitor is not None else {}
+    schema_errors = validate_caption(caption)
     duration_sec = time.monotonic() - started
-    metadata = {
-        "image": str(image_path),
-        "image_name": row["image_name"],
-        "scopes": row["scopes"],
-        "raw_category": category,
-        "target_category": caption.get("category_specific_check", {}).get(
-            "target_category", category
-        ),
-        "provider": provider,
-        "saas_provider": saas_provider,
-        "model": model,
-        "mode": mode,
-        "created_at": now_iso(),
-        "total_duration_sec": duration_sec,
-    }
-    if provider == "local":
-        metadata.update(local_usage)
-    metadata.update(runtime_gpu_metadata)
     return {
-        "metadata": metadata,
+        "metadata": {
+            "image": str(image_path),
+            "image_name": row["image_name"],
+            "scopes": row["scopes"],
+            "raw_category": category,
+            "target_category": caption.get("category_specific_check", {}).get(
+                "target_category", category
+            ),
+            "provider": provider,
+            "saas_provider": saas_provider,
+            "model": model,
+            "mode": mode,
+            "created_at": now_iso(),
+            "total_duration_sec": duration_sec,
+        },
         "caption": caption,
         "auxiliary_vqa": vqa,
         "self_check": self_check,
@@ -1155,13 +938,6 @@ def generate_outputs(args: argparse.Namespace) -> None:
                     stats["by_mode"][mode]["total_duration_sec"] += result.get(
                         "metadata", {}
                     ).get("total_duration_sec", 0.0)
-                    update_runtime_stats_from_metadata(
-                        stats, mode, result.get("metadata", {})
-                    )
-                    if provider == "local":
-                        update_local_usage_stats_from_metadata(
-                            stats, mode, result.get("metadata", {})
-                        )
                     if result.get("schema_validation", {}).get("pass"):
                         stats["by_mode"][mode]["schema_valid_count"] += 1
                 stats["success_count"] += 1
@@ -1635,13 +1411,6 @@ def load_bundles(
     scopes: set[str] | None = None,
 ) -> dict[str, dict[str, Any]]:
     output_dir = run_dir / "outputs" / provider / mode
-    return load_bundles_from_dir(output_dir, scopes)
-
-
-def load_bundles_from_dir(
-    output_dir: Path,
-    scopes: set[str] | None = None,
-) -> dict[str, dict[str, Any]]:
     if not output_dir.exists():
         return {}
     bundles = {}
@@ -1846,23 +1615,10 @@ def baseline_quality_gate(
 def score_outputs(args: argparse.Namespace) -> None:
     run_dir = Path(args.run_dir)
     score_scopes = scope_arg(args.score_scopes)
-    saas_simple_baseline_dir = Path(
-        getattr(args, "saas_simple_baseline_dir", DEFAULT_SAAS_SIMPLE_BASELINE_DIR)
-    )
-    simple_reference_source = "run_outputs"
-    simple_reference_dir = run_dir / "outputs" / "saas" / "simple"
-    if saas_simple_baseline_dir.exists():
-        simple_reference_source = "standard_saas_simple_baseline"
-        simple_reference_dir = saas_simple_baseline_dir
     reference_bundles_by_mode = {
-        "simple": load_bundles_from_dir(simple_reference_dir, score_scopes),
-        "full": load_bundles(run_dir, "saas", "full", score_scopes),
+        mode: load_bundles(run_dir, "saas", mode, score_scopes) for mode in MODES
     }
     warnings = []
-    if simple_reference_source == "standard_saas_simple_baseline":
-        warnings.append(
-            f"Using standard SaaS simple baseline from {simple_reference_dir}."
-        )
     for mode, bundles in reference_bundles_by_mode.items():
         if not bundles:
             warnings.append(
@@ -1876,26 +1632,13 @@ def score_outputs(args: argparse.Namespace) -> None:
         "reference_provider": "saas",
         "reference_mode": "same-mode",
         "score_scopes": sorted(score_scopes),
-        "reference_sources": {
-            "simple": {
-                "source": simple_reference_source,
-                "path": str(simple_reference_dir),
-            },
-            "full": {
-                "source": "run_outputs",
-                "path": str(run_dir / "outputs" / "saas" / "full"),
-            },
-        },
         "cells": {},
-        "reference_cells": {
-            mode: dict(self_metrics(list(bundles.values())))
-            for mode, bundles in reference_bundles_by_mode.items()
-        },
         "evaluation_comparisons": {},
         "score_summaries": [],
         "score_by_category": {},
         "warnings": warnings,
     }
+    csv_rows = []
     for provider in PROVIDERS:
         scores["cells"][provider] = {}
         for mode in MODES:
@@ -1938,6 +1681,15 @@ def score_outputs(args: argparse.Namespace) -> None:
                     "overall_score": None,
                 }
                 scores["score_summaries"].append(summary)
+            csv_rows.append(
+                {
+                    "provider": provider,
+                    "mode": mode,
+                    **cell,
+                    **{f"vs_reference_{k}": v for k, v in cell["vs_reference"].items()},
+                }
+            )
+
     local_simple = scores["cells"].get("local", {}).get("simple", {})
     local_full = scores["cells"].get("local", {}).get("full", {})
     saas_simple = scores["cells"].get("saas", {}).get("simple", {})
@@ -1985,11 +1737,16 @@ def score_outputs(args: argparse.Namespace) -> None:
     scores["baseline_quality_gate"] = baseline_quality_gate(
         reference_provider="saas",
         reference_mode=args.reference_mode,
-        reference_cell=scores["reference_cells"].get(args.reference_mode, {}),
+        reference_cell=scores["cells"].get("saas", {}).get(args.reference_mode, {}),
     )
 
     write_json(run_dir / "scores.json", scores)
     write_scores_md(run_dir, scores)
+    with (run_dir / "scores.csv").open("w", newline="", encoding="utf-8") as f:
+        fieldnames = sorted({key for row in csv_rows for key in row})
+        writer = csv.DictWriter(f, fieldnames=fieldnames)
+        writer.writeheader()
+        writer.writerows(csv_rows)
     update_experiment_record(
         run_dir,
         {
@@ -2335,15 +2092,6 @@ def parse_args() -> argparse.Namespace:
     score_parser.add_argument("--run-dir", required=True)
     score_parser.add_argument("--reference-mode", choices=MODES, default="full")
     score_parser.add_argument("--score-scopes", default="smoke")
-    score_parser.add_argument(
-        "--saas-simple-baseline-dir",
-        default=str(DEFAULT_SAAS_SIMPLE_BASELINE_DIR),
-        help=(
-            "Directory containing standard SaaS simple reference JSON files. "
-            "Default: runs/saas_simple_baseline. If missing, falls back to "
-            "<run-dir>/outputs/saas/simple."
-        ),
-    )
     score_parser.set_defaults(func=score_outputs)
 
     charts_parser = subparsers.add_parser("charts")
@@ -2374,11 +2122,6 @@ def parse_args() -> argparse.Namespace:
     run_parser.add_argument("--saas-backoff-base-sec", type=float, default=2.0)
     run_parser.add_argument("--reference-mode", choices=MODES, default="full")
     run_parser.add_argument("--score-scopes", default="smoke")
-    run_parser.add_argument(
-        "--saas-simple-baseline-dir",
-        default=str(DEFAULT_SAAS_SIMPLE_BASELINE_DIR),
-        help="Standard SaaS simple reference directory used during scoring.",
-    )
     run_parser.add_argument("--stop-before-score", action="store_true")
     run_parser.set_defaults(func=run_all)
 
