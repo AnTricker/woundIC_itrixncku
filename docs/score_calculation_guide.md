@@ -142,10 +142,10 @@ re.findall(r"[a-zA-Z0-9_]+", text.lower())
 重要限制：
 
 ```text
-目前 score 應該用原始英文 model output 計算，不應該用翻譯後的繁中 output 計算。
+目前四個 lexical score 應該用原始英文 model output 計算，不應該用翻譯後的繁中 output 計算。
 ```
 
-原因是中文翻譯文字在目前 tokenization 下幾乎不會被正確切成 token，會導致 score 失真。
+原因是中文翻譯文字在目前 tokenization 下幾乎不會被正確切成 token，會導致 BLEU-4 / ROUGE-L / METEOR-lite / CIDEr-lite 失真。606 階段的 grouped BERTScore 例外，會用 multilingual embedding model 處理繁中與 mixed-language text。
 
 範例：
 
@@ -656,3 +656,315 @@ local output 和 SaaS reference 在目前抽取欄位上的文字相似程度。
 - 分開計算 `visual_summary`、`wound_features`、`category_specific_check` 的子分數。
 
 目前這版 score 適合當作 smoke test 的快速、自動化文字相似度指標；不適合單獨當作最終模型品質結論。
+
+## 15. BERTScore Grouped Semantic Comparison
+
+606 階段新增 `scripts/bertscore_rescore.py`，用 BERTScore 補充上述四個 lexical score。
+
+BERTScore 不看 exact n-gram overlap，而是使用 contextual token embedding 比較 candidate/reference 的語意相似度。它比較適合回答：
+
+```text
+兩段文字是否語意接近，即使用詞、句型或語言不同？
+```
+
+它仍然不能回答：
+
+```text
+影像描述是否醫學上正確？
+```
+
+### 15.1 Grouped Comparison Data
+
+606 階段不再把 BERTScore 拆成 source score / translation score 兩套。所有比較都放在同一份 grouped comparison report：
+
+| ID | Data | Meaning |
+|---|---|---|
+| `a` | reference English | SaaS / Gemini 原始英文 caption |
+| `b` | translated reference | SaaS / Gemini caption 的繁中翻譯 |
+| `c` | candidate English | local model 原始英文 caption |
+| `d` | translated candidate | local model caption 的繁中翻譯 |
+
+五組 comparison：
+
+| Comparison | Group | Meaning |
+|---|---|---|
+| `a_vs_c` | caption quality | local English caption 是否接近 SaaS English reference |
+| `a_vs_b` | translation faithfulness | reference translation 是否保留 reference English 語意 |
+| `c_vs_d` | translation faithfulness | candidate translation 是否保留 candidate English 語意 |
+| `a_vs_d` | human-review calibration | translated candidate 與 English reference 的語意距離 |
+| `b_vs_d` | human-review calibration | translated candidate 與 translated reference 的中文 review 情境 |
+
+這五組同等重要，只是回答不同問題。不要把它們壓成單一總分。
+
+### 15.2 BERTScore P / R / F1
+
+| Metric | Meaning |
+|---|---|
+| `bertscore_precision` | candidate token 是否能被 reference 語意支持 |
+| `bertscore_recall` | reference token 是否被 candidate 語意覆蓋 |
+| `bertscore_f1` | precision / recall 的 harmonic mean |
+
+常見解讀：
+
+```text
+precision 低：candidate 可能加入 reference 沒有支持的內容。
+recall 低：candidate 可能漏掉 reference 的內容。
+F1：語意接近度摘要，但仍需依 comparison group 解讀。
+```
+
+### 15.3 Text Extraction Rule
+
+BERTScore 使用與目前四個 lexical score 相同的 `caption_text()` 欄位：
+
+```text
+caption.image_observation.visual_summary
+caption.wound_features.shape_pattern
+caption.wound_features.edges_margins
+caption.wound_features.wound_bed
+caption.wound_features.color
+caption.wound_features.texture
+caption.wound_features.fluid_exudate_bleeding
+caption.wound_features.periwound_skin
+caption.category_specific_check.observed_supporting_features
+```
+
+這樣 BERTScore 才能和 BLEU-4 / ROUGE-L / METEOR-lite / CIDEr-lite 放在同一個解讀脈絡。
+
+### 15.4 Category / Summary Calculation
+
+`scripts/bertscore_rescore.py` 的 report 有三層：
+
+```text
+by_image -> by_category -> summary
+```
+
+每一組 comparison 都會獨立計算這三層。也就是：
+
+```text
+a_vs_c 有自己的 by_image / by_category / summary
+a_vs_b 有自己的 by_image / by_category / summary
+c_vs_d 有自己的 by_image / by_category / summary
+a_vs_d 有自己的 by_image / by_category / summary
+b_vs_d 有自己的 by_image / by_category / summary
+```
+
+這五組不會互相平均，也不會壓成一個 final BERTScore。
+
+#### 15.4.1 Data Source Matching
+
+每一組 comparison 先根據 JSON 檔名 stem 配對。
+
+例如：
+
+```text
+runs/saas_simple_baseline/bruises (16).json
+runs/20260525_gemma4_26b/outputs/local/simple/bruises (16).json
+```
+
+兩邊 stem 都是：
+
+```text
+bruises (16)
+```
+
+所以會成為 matched image。
+
+程式邏輯：
+
+```text
+matched_images = sorted(set(reference_files) & set(candidate_files))
+unmatched_images = sorted(set(reference_files) ^ set(candidate_files))
+```
+
+意思是：
+
+- `matched_image_count`: reference / candidate 兩邊都存在的圖片數。
+- `unmatched_image_count`: 只存在其中一邊的圖片數。
+- BERTScore 只會在 matched images 上計算。
+- unmatched images 會被記錄，但不直接拉低 P / R / F1。
+
+#### 15.4.2 Empty Text Filtering
+
+matched image 之後，程式會用 `caption_text()` 抽出要比較的文字。
+
+如果某張圖的 candidate text 或 reference text 是空字串，該 pair 不會進入 BERTScore batch。
+
+因此：
+
+```text
+matched_image_count >= scored_image_count
+```
+
+例如 report 中可能出現：
+
+```text
+matched_image_count = 43
+scored_image_count = 42
+empty_text_pair_count = 1
+```
+
+這代表有 43 張圖片檔名配對成功，但只有 42 張有非空 caption text 可以計算。
+
+#### 15.4.3 Per-Image Score
+
+每張有效圖片會得到三個數字：
+
+```text
+bertscore_precision
+bertscore_recall
+bertscore_f1
+```
+
+它們會記錄在 JSON 的：
+
+```text
+summary.<comparison_id>.by_image[]
+```
+
+每個 `by_image` row 會包含：
+
+| Field | Meaning |
+|---|---|
+| `image` | JSON stem / image id |
+| `category` | 該圖片分類 |
+| `bertscore_precision` | 該圖片 pair 的 precision |
+| `bertscore_recall` | 該圖片 pair 的 recall |
+| `bertscore_f1` | 該圖片 pair 的 F1 |
+| `candidate_text` | BERTScore candidate text |
+| `reference_text` | BERTScore reference text |
+
+#### 15.4.4 Category Label Rule
+
+每張圖的 category 由 candidate bundle 優先提供。
+
+程式順序：
+
+```text
+metadata.target_category
+metadata.raw_category
+caption.category_specific_check.target_category
+filename prefix before " ("
+"unknown"
+```
+
+也就是說，如果 JSON metadata 裡有 `target_category`，就用它。若沒有，才依序 fallback 到其他欄位。
+
+#### 15.4.5 Category Score
+
+Category table 是在同一個 comparison group 內，依 category 分組後取平均。
+
+公式：
+
+```text
+category_precision = mean(image_precision for images in this category)
+category_recall    = mean(image_recall    for images in this category)
+category_f1        = mean(image_f1        for images in this category)
+```
+
+範例：
+
+```text
+a_vs_c / bruises
+```
+
+只會平均 `a_vs_c` 裡 category 是 `bruises` 的圖片，不會混入 `a_vs_b` 或其他 comparison。
+
+Category table 的 `Count` 是該 category 被實際 scored 的圖片數，不是整個 dataset 的 category 總數。
+
+#### 15.4.6 Summary Score
+
+Summary table 是同一個 comparison group 內，對所有 scored images 取平均。
+
+公式：
+
+```text
+summary_precision = mean(image_precision for all scored images in this comparison)
+summary_recall    = mean(image_recall    for all scored images in this comparison)
+summary_f1        = mean(image_f1        for all scored images in this comparison)
+```
+
+注意：
+
+```text
+summary_f1 不是 category_f1 的平均。
+summary_f1 是所有 scored image 的 image-level F1 平均。
+```
+
+所以如果某個 category 圖片比較多，它自然會在 summary 中佔比較多權重。
+
+#### 15.4.7 Skipped Group
+
+如果某組 comparison 沒有 matched image，狀態會是：
+
+```text
+skipped_no_matched_images
+```
+
+如果有 matched image，但抽出的 `caption_text()` 全部為空，狀態會是：
+
+```text
+skipped_no_nonempty_caption_text
+```
+
+如果正常計算，狀態會是：
+
+```text
+scored
+```
+
+#### 15.4.8 Lowest / Highest Examples
+
+Markdown report 的 lowest / highest examples 是依照該 comparison group 的 `bertscore_f1` 排序：
+
+```text
+lowest 3  = F1 最低的三張圖
+highest 3 = F1 最高的三張圖
+```
+
+這一區只用來快速抽查案例，不參與 summary score 計算。
+
+### 15.5 Embedding Part
+
+BERTScore 的 embedding part 大致是：
+
+1. 用 tokenizer 將 candidate/reference 切成 tokens。
+2. 用指定 embedding model 將每個 token 轉成 contextual embedding。
+3. 計算 candidate token 與 reference token embedding 的 cosine similarity。
+4. 用 token-level maximum similarity 形成 precision 與 recall。
+5. 再用 precision / recall 算 F1。
+
+因此它比 exact token overlap 更能處理：
+
+- synonym
+- paraphrase
+- word order difference
+- mixed Chinese-English text
+
+### 15.6 可設定參數
+
+| Parameter | Meaning |
+|---|---|
+| `model_type` | embedding model，例如 `bert-base-multilingual-cased` |
+| `num_layers` | 使用第幾層 hidden states |
+| `lang` | 語言設定 |
+| `idf` | 是否啟用 IDF weighting |
+| `rescale_with_baseline` | 是否用 baseline rescale 分數 |
+| `batch_size` | 批次大小 |
+| `device` | `cpu` 或 `cuda` |
+| `use_fast_tokenizer` | 是否使用 fast tokenizer |
+
+606 grouped comparison 預設使用 multilingual model，因為資料同時包含 English、Chinese、mixed Chinese-English text。
+
+目前建議：
+
+```text
+model_type = bert-base-multilingual-cased
+rescale_with_baseline = False
+idf = False
+```
+
+原因：
+
+- smoke set 小，IDF 不穩定。
+- multilingual baseline rescale 是否適合需要先驗證。
+- mixed-language output 是預期行為，不應被英文-only model 懲罰。

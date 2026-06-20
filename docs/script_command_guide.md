@@ -30,15 +30,16 @@ runs/20260525_gemma4_26b
 | 4 | `scripts/gemini_probe.py` | Test Gemini on one image before full SaaS generation |
 | 5 | `scripts/generate_saas.py` | Generate Gemini/SaaS outputs |
 | 6 | `scripts/score.py` | Score local outputs against standard SaaS simple baseline |
-| 7 | `scripts/charts.py` | Generate run-local charts |
-| 8 | `scripts/run_all.py` | Optional one-command pipeline run |
-| 9 | `scripts/metadata.py` | Build run-local metadata report |
-| 10 | `scripts/translate.py` | Translate all output captions with local Ollama model |
-| 11 | `scripts/compare_visual_summary_translations.py` | Compare translated visual summaries across 510 local, 523 local, and SaaS simple |
-| 12 | `scripts/fix_charts.py` | Rewrite chart PNGs with clearer labels |
-| 13 | `docs/score_calculation_guide.md` | Explain current BLEU-4, ROUGE-L, METEOR-lite, CIDEr-lite calculations |
-| 14 | Validation | Static command checks |
-| 15 | Update Record | Record when scripts are added or changed |
+| 7 | `scripts/bertscore_rescore.py` | Compute grouped BERTScore semantic comparisons |
+| 8 | `scripts/charts.py` | Generate run-local charts |
+| 9 | `scripts/run_all.py` | Optional one-command pipeline run |
+| 10 | `scripts/metadata.py` | Build run-local metadata report |
+| 11 | `scripts/translate.py` | Translate all output captions with local Ollama model |
+| 12 | `scripts/compare_visual_summary_translations.py` | Compare translated visual summaries across 510 local, 523 local, and SaaS simple |
+| 13 | `scripts/fix_charts.py` | Rewrite chart PNGs with clearer labels |
+| 14 | `docs/score_calculation_guide.md` | Explain current BLEU-4, ROUGE-L, METEOR-lite, CIDEr-lite, and BERTScore calculations |
+| 15 | Validation | Static command checks |
+| 16 | Update Record | Record when scripts are added or changed |
 
 ## 1. Standard Form
 
@@ -238,7 +239,63 @@ Meaning:
 - `local full` still requires a same-mode `saas full` reference; otherwise full score is not evaluable.
 - `--reference-mode simple` chooses the baseline quality gate mode; it does not create cross-mode scoring.
 
-## 7. Generate Charts
+## 7. Grouped BERTScore Semantic Comparison
+
+Purpose:
+
+- Does not call any generation model.
+- Reads existing English outputs, translated outputs, and the standard SaaS simple baseline.
+- Computes grouped BERTScore comparisons for `a/b/c/d` data.
+- Writes run-local semantic comparison artifacts.
+
+Command:
+
+```bash
+python scripts/bertscore_rescore.py \
+  --run-dir runs/20260525_gemma4_26b \
+  --translation-root runs/20260525_gemma4_26b/output_translation \
+  --provider local \
+  --mode simple \
+  --score-type grouped \
+  --lang zh \
+  --model-type bert-base-multilingual-cased
+```
+
+Outputs:
+
+```text
+runs/20260525_gemma4_26b/bertscore_comparisons.json
+runs/20260525_gemma4_26b/bertscore_comparisons.md
+```
+
+Meaning:
+
+- `a_vs_c`: caption quality, local English caption vs SaaS English reference.
+- `a_vs_b`: reference translation faithfulness.
+- `c_vs_d`: candidate translation faithfulness.
+- `a_vs_d`: cross-lingual candidate-to-reference calibration.
+- `b_vs_d`: translated review calibration.
+- These groups are separate and must not be compressed into one final score.
+- Mixed Chinese-English text is expected when English medical terms are intentionally preserved.
+- Grouped mode requires all four data sources. If the selected run does not contain `output_translation/`, the script auto-searches `runs/*/output_translation/<provider>/<mode>` and chooses the folder with the most matching JSON filenames.
+- If any `a/b/c/d` source is still missing, the script stops with a clear error. Use `--allow-partial` only when an intentionally incomplete report is needed.
+
+Common parameters:
+
+| Argument | Meaning |
+|---|---|
+| `--model-type` | BERTScore embedding model |
+| `--num-layers` | Embedding layer |
+| `--lang` | Language setting |
+| `--idf` | Enable IDF weighting |
+| `--rescale-with-baseline` | Enable baseline rescale after multilingual baseline is verified |
+| `--batch-size` | Batch size |
+| `--device` | `cpu` or `cuda` |
+| `--use-fast-tokenizer` | Use fast tokenizer |
+| `--limit` | Optional small dry-run limit |
+| `--allow-partial` | Allow incomplete `a/b/c/d` sources and score only available groups |
+
+## 8. Generate Charts
 
 Purpose:
 
@@ -259,7 +316,7 @@ Outputs:
 runs/20260525_gemma4_26b/charts/*.png
 ```
 
-## 8. Optional Run-All
+## 9. Optional Run-All
 
 Purpose:
 
@@ -287,7 +344,7 @@ python scripts/run_all.py \
   --saas-simple-baseline-dir runs/saas_simple_baseline
 ```
 
-## 9. Metadata Report
+## 10. Metadata Report
 
 Purpose:
 
@@ -308,7 +365,7 @@ Outputs:
 runs/20260525_gemma4_26b/20260525_gemma4_26b_record_summary.md
 ```
 
-## 10. Caption Translation
+## 11. Caption Translation
 
 Purpose:
 
@@ -342,9 +399,10 @@ Meaning:
 - The translated file mirrors the original result JSON.
 - Each new translated JSON records translation model token count, duration, prefill/decode time, and local runtime GPU/VRAM sampling.
 - The translation summary table groups translated results by source provider, source prompt mode, source model, and translation model.
-- Translation is for human review only and must not be used for scoring.
+- Translation is for human review and grouped BERTScore comparison only.
+- Translation must not be used for the lexical `scores.json` / `scores.md` calculation.
 
-## 11. Visual Summary Translation Comparison
+## 12. Visual Summary Translation Comparison
 
 Purpose:
 
@@ -372,7 +430,7 @@ Meaning:
 - It does not modify original outputs.
 - It does not participate in scoring.
 
-## 12. Chart Fix
+## 13. Chart Fix
 
 Purpose:
 
@@ -393,11 +451,11 @@ runs/20260525_gemma4_26b/charts/*.png
 runs/20260525_gemma4_26b/charts/_backup_before_523_fix/*.png
 ```
 
-## 13. Score Calculation Guide
+## 14. Score Calculation Guide
 
 Purpose:
 
-- Explains how the current four text similarity scores are calculated.
+- Explains how the current four lexical text similarity scores and BERTScore grouped comparison are calculated.
 - Written mainly in Traditional Chinese.
 - Documents current implementation details, not official metric packages.
 
@@ -412,7 +470,7 @@ Meaning:
 - Use this document when interpreting `scores.json` and `scores.md`.
 - It explains what the scores can and cannot prove.
 
-## 14. Validation
+## 15. Validation
 
 Static validation:
 
@@ -425,6 +483,7 @@ python -m py_compile \
   scripts/gemini_probe.py \
   scripts/generate_saas.py \
   scripts/score.py \
+  scripts/bertscore_rescore.py \
   scripts/charts.py \
   scripts/run_all.py \
   scripts/metadata.py \
@@ -439,7 +498,7 @@ Legacy pipeline command list:
 python -m pipeline --help
 ```
 
-## 15. Update Record
+## 16. Update Record
 
 | Date | Command / Script | Change |
 |---|---|---|
@@ -453,3 +512,5 @@ python -m pipeline --help
 | 2026-05-25 | `pipeline.py`, `run_simple_smoke.sh` | Added local Ollama token/timing recording, removed new `scores.csv` output, and standardized new run names as `<YYYYMMDD>_<model>`. |
 | 2026-05-25 | `scripts/metadata.py` | Report filename now follows the selected run name and is written directly under that run directory. |
 | 2026-05-25 | `scripts/translate.py` | Added per-translation local usage metadata and automatic `output_translation/<run-name>_translation_summary.md` report generation. |
+| 2026-06-06 | `scripts/bertscore_rescore.py` | Added grouped BERTScore semantic comparison for caption quality, translation faithfulness, and human-review calibration. |
+| 2026-06-06 | `docs/score_calculation_guide.md` | Added BERTScore grouped semantic comparison explanation and parameter table. |

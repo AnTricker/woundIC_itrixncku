@@ -2,3 +2,6 @@ ollama
 jsonschema
 httpx
 matplotlib
+bert-score
+torch
+transformers
