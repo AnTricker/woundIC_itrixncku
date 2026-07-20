@@ -2,6 +2,6 @@ ollama
 jsonschema
 httpx
 matplotlib
-bert-score
+bert-score==0.3.13
 torch
 transformers

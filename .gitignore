@@ -118,3 +118,6 @@ reference/
 *.log
 tmp/
 temp/
+
+# paper reference
+docs/bertScore.pdf

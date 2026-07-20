@@ -247,48 +247,62 @@ Meaning:
 Purpose:
 
 - Does not call any generation model.
-- Reads explicit `A/B/C/D` source folders only.
-- Computes BERTScore for `AC` and `BD`.
-- Computes the selected scoring scope.
-- `visual_summary_only` and `full_caption_fields` should usually be run as separate commands for independent reports.
+- Computes one formal comparison per command: English `AC` or translated Chinese `BD`.
+- Computes one scope per command: `visual_summary_only` or `full_caption_fields`.
+- Uses the upstream language default model and official baseline rescaling.
+- `AC` uses `lang=en` / `roberta-large`; `BD` uses `lang=zh` / `bert-base-chinese`.
 - Writes independent semantic comparison artifacts under `runs/bertscore_reports/`.
 
-Command: visual summary only
+Command: AC English visual summary
 
 ```bash
 python scripts/bertscore_rescore.py \
   --run-dir runs/20260525_gemma4_26b \
+  --comparisons AC \
   --reference-dir runs/saas_simple_baseline \
-  --reference-translation-dir runs/510_smoke_v1/output_translation/saas/simple \
   --candidate-dir runs/20260525_gemma4_26b/outputs/local/simple \
-  --candidate-translation-dir runs/20260525_gemma4_26b/output_translation/local/simple \
-  --provider local \
-  --mode simple \
-  --score-type grouped \
   --scopes visual_summary_only \
   --output-dir runs/bertscore_reports \
-  --report-id 20260525_gemma4_26b_local_simple_vs_saas_simple_visual_summary_only \
-  --lang zh \
-  --model-type bert-base-multilingual-cased
+  --report-id 20260525_gemma4_26b_AC_visual_summary
 ```
 
-Command: full caption fields
+Command: AC English full caption fields
 
 ```bash
 python scripts/bertscore_rescore.py \
   --run-dir runs/20260525_gemma4_26b \
+  --comparisons AC \
   --reference-dir runs/saas_simple_baseline \
-  --reference-translation-dir runs/510_smoke_v1/output_translation/saas/simple \
   --candidate-dir runs/20260525_gemma4_26b/outputs/local/simple \
-  --candidate-translation-dir runs/20260525_gemma4_26b/output_translation/local/simple \
-  --provider local \
-  --mode simple \
-  --score-type grouped \
   --scopes full_caption_fields \
   --output-dir runs/bertscore_reports \
-  --report-id 20260525_gemma4_26b_local_simple_vs_saas_simple_full_caption_fields \
-  --lang zh \
-  --model-type bert-base-multilingual-cased
+  --report-id 20260525_gemma4_26b_AC_full_caption_fields
+```
+
+Command: BD translated Chinese visual summary
+
+```bash
+python scripts/bertscore_rescore.py \
+  --run-dir runs/20260525_gemma4_26b \
+  --comparisons BD \
+  --reference-translation-dir runs/510_smoke_v1/output_translation/saas/simple \
+  --candidate-translation-dir runs/20260525_gemma4_26b/output_translation/local/simple \
+  --scopes visual_summary_only \
+  --output-dir runs/bertscore_reports \
+  --report-id 20260525_gemma4_26b_BD_visual_summary
+```
+
+Command: BD translated Chinese full caption fields
+
+```bash
+python scripts/bertscore_rescore.py \
+  --run-dir runs/20260525_gemma4_26b \
+  --comparisons BD \
+  --reference-translation-dir runs/510_smoke_v1/output_translation/saas/simple \
+  --candidate-translation-dir runs/20260525_gemma4_26b/output_translation/local/simple \
+  --scopes full_caption_fields \
+  --output-dir runs/bertscore_reports \
+  --report-id 20260525_gemma4_26b_BD_full_caption_fields
 ```
 
 Outputs:
@@ -304,13 +318,12 @@ Meaning:
 - `BD`: human-review comparison, translated candidate vs translated reference.
 - `visual_summary_only`: only `caption.image_observation.visual_summary`.
 - `full_caption_fields`: visual summary plus structured wound fields.
-- Main `bertscore_precision`, `bertscore_recall`, and `bertscore_f1` values are normalized with `(raw + 1) / 2`.
-- Raw BERTScore values are preserved as `raw_bertscore_precision`, `raw_bertscore_recall`, and `raw_bertscore_f1`.
-- `--scopes`: chooses which scope to compute. Use `visual_summary_only`, `full_caption_fields`, or both with comma.
-- `delta_f1`: full-field F1 minus visual-summary F1. It is available only when both scopes are computed in the same report.
+- `bertscore_precision`, `bertscore_recall`, and `bertscore_f1` are upstream official baseline-rescaled values.
+- The project does not apply `(raw + 1) / 2` or clip scores to `[0, 1]`.
+- Each report records the upstream BERTScore hash, model, layer, language, and baseline path.
+- `--comparisons` and `--scopes` each accept exactly one value per command.
 - AC and BD are separate and must not be compressed into one final score.
-- Mixed Chinese-English text is expected when English medical terms are intentionally preserved.
-- All four `A/B/C/D` folders must be specified explicitly.
+- AC requires only A/C folders; BD requires only B/D folders.
 - The script intentionally does not auto-search other run folders because that can mix unrelated experiments.
 - If `20260525` only has local/simple output and no translation, run `scripts/translate.py` for that run first.
 
@@ -318,19 +331,15 @@ Common parameters:
 
 | Argument | Meaning |
 |---|---|
+| `--comparisons` | Exactly one comparison: `AC` or `BD` |
 | `--reference-dir` | A source: reference English caption JSON folder |
 | `--reference-translation-dir` | B source: translated reference caption JSON folder |
 | `--candidate-dir` | C source: candidate English caption JSON folder |
 | `--candidate-translation-dir` | D source: translated candidate caption JSON folder |
-| `--scopes` | `visual_summary_only`, `full_caption_fields`, or comma-separated both |
+| `--scopes` | Exactly one scope: `visual_summary_only` or `full_caption_fields` |
 | `--output-dir` | Independent report folder, default `runs/bertscore_reports` |
 | `--report-id` | Filename prefix for traceability |
-| `--include-diagnostic` | Also score AB/CD/AD diagnostic comparisons |
-| `--model-type` | BERTScore embedding model |
-| `--num-layers` | Embedding layer |
-| `--lang` | Language setting |
 | `--idf` | Enable IDF weighting |
-| `--rescale-with-baseline` | Enable baseline rescale after multilingual baseline is verified |
 | `--batch-size` | Batch size |
 | `--device` | `cpu` or `cuda` |
 | `--use-fast-tokenizer` | Use fast tokenizer |
