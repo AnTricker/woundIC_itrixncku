@@ -1,720 +1,137 @@
-# Score Calculation Guide
+# BERTScore Calculation Guide
 
-本文件說明目前 `pipeline.py` 中四個文字相似度分數的實際計算方式：
+本文件只說明目前專案使用的 BERTScore 計算方式。舊的 `BLEU-4`、`ROUGE-L`、`METEOR-lite`、`CIDEr-lite` 不再放在本 guide，避免和 620 階段的 semantic score 解讀混在一起。
 
-- `BLEU-4`
-- `ROUGE-L`
-- `METEOR-lite`
-- `CIDEr-lite`
-
-這份說明以目前程式實作為準，不是論文或官方套件的完整版本。程式位置主要在 `pipeline.py`：
-
-- `tokenise`
-- `caption_text`
-- `bleu4`
-- `rouge_l`
-- `meteor_lite`
-- `cider_lite`
-- `paired_scores`
-
-## 1. 分數用途
-
-目前 score 用來比較：
+主要 script：
 
 ```text
-candidate = local model output
-reference = SaaS/Gemini baseline output
+scripts/bertscore_rescore.py
 ```
 
-主要比較項目：
+主要參考：
 
 ```text
-local simple vs saas simple
-local full   vs saas full
+docs/bertScore.pdf
+Tianyi Zhang et al., BERTScore: Evaluating Text Generation with BERT, ICLR 2020.
 ```
 
-目前 simple 的標準 reference 來源是：
+## 1. BERTScore 在本專案的用途
+
+本專案用 BERTScore 回答：
 
 ```text
-runs/saas_simple_baseline
+candidate caption 和 reference caption 在語意上有多接近？
 ```
 
-也就是說，未來重跑 local simple 時，不需要每次重新呼叫 Gemini simple；score 會拿 local simple 去對這份固定 SaaS simple baseline。
-
-## 2. 先配對圖片
-
-程式先用 JSON 檔名 stem 配對 candidate 與 reference。
-
-範例：
+它不能回答：
 
 ```text
-runs/523_smoke_v2/outputs/local/simple/bruises (16).json
-runs/saas_simple_baseline/bruises (16).json
+影像描述是否醫學正確？
+傷口分類是否正確？
+caption 是否足夠可用於 clinical decision？
 ```
 
-這兩個檔案的 stem 都是：
+因此 BERTScore 必須搭配：
+
+- per-image evidence text。
+- `visual_summary_only` vs `full_caption_fields` delta。
+- schema validity。
+- VQA-style check。
+- human review。
+
+## 2. A/B/C/D Data Source
+
+620 之後，BERTScore 的四個資料來源必須由 command 明確指定。script 不會自動搜尋其他 run folder。
+
+| ID | Meaning | Command Argument |
+|---|---|---|
+| `A` | reference English caption | `--reference-dir` |
+| `B` | translated reference caption | `--reference-translation-dir` |
+| `C` | candidate English caption | `--candidate-dir` |
+| `D` | translated candidate caption | `--candidate-translation-dir` |
+
+原因：
 
 ```text
-bruises (16)
+如果某個 run 只有 local/simple output，script 不應該自動拿其他 run 的 translation 補 B/D。
+跨 run source 只能在 command 中明確指定，否則結果不可追蹤。
 ```
 
-所以它們會被視為同一張圖的 candidate/reference pair。
+範例 command：
 
-計算方式：
-
-```python
-common = sorted(set(candidate_bundles) & set(reference_bundles))
-unmatched = len(set(candidate_bundles) ^ set(reference_bundles))
+```bash
+python scripts/bertscore_rescore.py \
+  --run-dir runs/20260525_gemma4_26b \
+  --reference-dir runs/saas_simple_baseline \
+  --reference-translation-dir runs/510_smoke_v1/output_translation/saas/simple \
+  --candidate-dir runs/20260525_gemma4_26b/outputs/local/simple \
+  --candidate-translation-dir runs/20260525_gemma4_26b/output_translation/local/simple \
+  --provider local \
+  --mode simple \
+  --score-type grouped \
+  --output-dir runs/bertscore_reports \
+  --report-id 20260525_gemma4_26b_local_simple_vs_saas_simple \
+  --lang zh \
+  --model-type bert-base-multilingual-cased
 ```
 
-意思是：
+## 3. Main Comparison Groups
 
-- `matched_image_count`: candidate 與 reference 都存在的圖片數。
-- `unmatched_image_count`: 只存在其中一邊的圖片數。
-- 四個 score 只會在 matched images 上計算。
-- unmatched images 不會直接拉低 BLEU/ROUGE/METEOR/CIDEr，但會被記錄在 score table 裡。
+目前主結果只看：
 
-如果完全沒有 matched image：
-
-```text
-BLEU-4 = 0
-ROUGE-L = 0
-METEOR-lite = 0
-CIDEr-lite = 0
-```
-
-## 3. 每張圖拿哪些文字來比
-
-程式不是拿整個 JSON 來比，也不是只拿 `visual_summary`。
-
-目前 `caption_text(bundle)` 會抽取以下欄位，接成一大段文字：
-
-```text
-caption.image_observation.visual_summary
-caption.wound_features.shape_pattern
-caption.wound_features.edges_margins
-caption.wound_features.wound_bed
-caption.wound_features.color
-caption.wound_features.texture
-caption.wound_features.fluid_exudate_bleeding
-caption.wound_features.periwound_skin
-caption.category_specific_check.observed_supporting_features
-```
-
-其中 `observed_supporting_features` 是 list，會用空白接起來。
-
-不參與這四個文字 score 的欄位包括：
-
-- `body_site`
-- `wound_presence`
-- `measurement_tool`
-- `foreign_material_debris`
-- `necrosis_eschar`
-- `expected_but_not_observed`
-- `differential_visual_conflicts`
-- `uncertainty`
-- `safety_scope`
-- `auxiliary_vqa`
-- `self_check`
-- `metadata`
-- `schema_validation`
-
-這代表目前四個 score 主要評估「核心視覺描述與傷口特徵描述」的文字相似度。
-
-## 4. Tokenization 規則
-
-所有分數都先使用同一個 `tokenise(text)`。
-
-目前規則：
-
-```python
-re.findall(r"[a-zA-Z0-9_]+", text.lower())
-```
-
-意思是：
-
-- 全部轉小寫。
-- 只保留英文字母、數字、底線。
-- 標點符號會被移除。
-- 空白只用來分隔 token。
-- 中文字不會被這個 regex 抓到。
-
-重要限制：
-
-```text
-目前四個 lexical score 應該用原始英文 model output 計算，不應該用翻譯後的繁中 output 計算。
-```
-
-原因是中文翻譯文字在目前 tokenization 下幾乎不會被正確切成 token，會導致 BLEU-4 / ROUGE-L / METEOR-lite / CIDEr-lite 失真。606 階段的 grouped BERTScore 例外，會用 multilingual embedding model 處理繁中與 mixed-language text。
-
-範例：
-
-```text
-"Raw, erythematous surface with serous exudate."
-```
-
-會變成：
-
-```text
-["raw", "erythematous", "surface", "with", "serous", "exudate"]
-```
-
-## 5. BLEU-4 怎麼算
-
-### 5.1 目的
-
-BLEU-4 看 candidate 裡的 n-gram 有多少也出現在 reference 裡。
-
-它偏向回答：
-
-```text
-candidate 有沒有使用和 reference 相似的詞組？
-```
-
-### 5.2 n-gram
-
-程式會計算 1 到 4 gram：
-
-```text
-1-gram: 單字
-2-gram: 連續兩個 token
-3-gram: 連續三個 token
-4-gram: 連續四個 token
-```
-
-例如：
-
-```text
-tokens = ["raw", "red", "wound", "bed"]
-```
-
-則：
-
-```text
-1-gram: raw, red, wound, bed
-2-gram: raw red, red wound, wound bed
-3-gram: raw red wound, red wound bed
-4-gram: raw red wound bed
-```
-
-### 5.3 每個 n 的 precision
-
-對每個 n：
-
-```text
-precision_n = clipped_overlap_count / candidate_ngram_count
-```
-
-`clipped_overlap_count` 的意思是：
-
-如果 candidate 某個 n-gram 出現很多次，但 reference 只出現一次，最多只算 reference 的次數。
-
-程式：
-
-```python
-overlap = sum(min(count, ref_ngrams[gram]) for gram, count in cand_ngrams.items())
-precision = overlap / sum(cand_ngrams.values())
-```
-
-如果 candidate 沒有某個 n-gram，程式給一個極小值：
-
-```text
-1e-9
-```
-
-避免 log 計算直接壞掉。
-
-### 5.4 brevity penalty
-
-BLEU 會懲罰太短的 candidate。
-
-程式：
-
-```python
-brevity = 1.0 if len(cand) > len(ref) else exp(1 - len(ref) / len(cand))
-```
-
-意思是：
-
-- candidate 比 reference 長：不懲罰，`brevity = 1`
-- candidate 比 reference 短或一樣長：給懲罰
-
-### 5.5 最終 BLEU-4
-
-程式使用四個 precision 的幾何平均，再乘上 brevity penalty：
-
-```text
-BLEU-4 = brevity * exp((log(p1) + log(p2) + log(p3) + log(p4)) / 4)
-```
-
-### 5.6 解讀
-
-高 BLEU-4 表示：
-
-- candidate 與 reference 使用很多相同詞組。
-- 特別是 2-gram 到 4-gram 也相似。
-
-低 BLEU-4 可能表示：
-
-- 描述內容不同。
-- 用詞不同但意思可能相近。
-- candidate 太短。
-- 長句順序不同。
-
-注意：
-
-```text
-BLEU-4 對同義詞不友善。
-```
-
-例如 `redness` 和 `erythema` 語意接近，但 token 不同，BLEU 不會把它們當成相同。
-
-## 6. ROUGE-L 怎麼算
-
-### 6.1 目的
-
-ROUGE-L 使用 LCS，Longest Common Subsequence，最長共同子序列。
-
-它偏向回答：
-
-```text
-candidate 和 reference 有沒有保留相似的描述順序？
-```
-
-### 6.2 LCS 是什麼
-
-LCS 是兩段 token sequence 中，順序一致但不要求連續的最長共同 token 序列。
-
-範例：
-
-```text
-candidate: ["raw", "red", "wound", "surface"]
-reference: ["raw", "moist", "red", "surface"]
-```
-
-共同子序列可以是：
-
-```text
-["raw", "red", "surface"]
-```
-
-長度為 3。
-
-### 6.3 程式如何計算 LCS
-
-程式用 dynamic programming 建一個表：
-
-```python
-dp = [[0] * (len(ref) + 1) for _ in range(len(cand) + 1)]
-```
-
-對每個 candidate token 與 reference token：
-
-```python
-if cand_token == ref_token:
-    dp[i][j] = dp[i - 1][j - 1] + 1
-else:
-    dp[i][j] = max(dp[i - 1][j], dp[i][j - 1])
-```
-
-最後：
-
-```python
-lcs = dp[-1][-1]
-```
-
-### 6.4 precision / recall / F1
-
-程式接著計算：
-
-```text
-precision = LCS長度 / candidate token數
-recall    = LCS長度 / reference token數
-```
-
-最後用 F1：
-
-```text
-ROUGE-L = 2 * precision * recall / (precision + recall)
-```
-
-如果 precision + recall = 0，則分數為 0。
-
-### 6.5 解讀
-
-高 ROUGE-L 表示：
-
-- candidate 和 reference 有長段相同 token。
-- 文字順序也相對接近。
-
-低 ROUGE-L 可能表示：
-
-- 內容差異大。
-- 用詞差異大。
-- 同樣資訊被用不同順序表達。
-
-ROUGE-L 比 BLEU 更能容忍中間插入一些詞，但仍然不理解同義詞。
-
-## 7. METEOR-lite 怎麼算
-
-### 7.1 目的
-
-這裡的 METEOR-lite 是非常簡化版，只看 token overlap，不做 stemming、synonym、chunk penalty。
-
-它偏向回答：
-
-```text
-candidate 和 reference 共享多少關鍵 token？
-```
-
-### 7.2 overlap
-
-程式用 Counter 計算 candidate 與 reference 的共同 token 數：
-
-```python
-overlap = sum((Counter(cand) & Counter(ref)).values())
-```
-
-`Counter(cand) & Counter(ref)` 會取每個 token 的最小出現次數。
-
-範例：
-
-```text
-candidate: red red wound
-reference: red wound wound
-```
-
-共同 token 數：
-
-```text
-red: min(2, 1) = 1
-wound: min(1, 2) = 1
-overlap = 2
-```
-
-### 7.3 precision / recall
-
-```text
-precision = overlap / candidate token數
-recall    = overlap / reference token數
-```
-
-### 7.4 最終 METEOR-lite
-
-程式公式：
-
-```text
-METEOR-lite = 10 * precision * recall / (recall + 9 * precision)
-```
-
-這個公式讓 recall 權重比 precision 更高。
-
-換句話說：
-
-```text
-有沒有覆蓋 reference 的內容，比 candidate 是否精簡更重要。
-```
-
-如果 precision + recall = 0，分數為 0。
-
-### 7.5 解讀
-
-高 METEOR-lite 表示：
-
-- candidate 覆蓋 reference 中很多 token。
-- 特別是 reference 的重要詞有被 candidate 提到。
-
-低 METEOR-lite 可能表示：
-
-- candidate 漏掉很多 reference 詞。
-- candidate 用了完全不同的詞。
-
-注意：
-
-```text
-目前 METEOR-lite 不處理同義詞。
-```
-
-例如：
-
-```text
-bruise / contusion
-redness / erythema
-fluid / exudate
-```
-
-如果 token 不同，目前就不算 overlap。
-
-## 8. CIDEr-lite 怎麼算
-
-### 8.1 目的
-
-這裡的 CIDEr-lite 也是簡化版。它不是完整 CIDEr-D，也沒有 TF-IDF corpus weighting。
-
-目前計算方式是：
-
-```text
-1 到 4 gram 的 cosine similarity 平均
-```
-
-它偏向回答：
-
-```text
-candidate 與 reference 的 n-gram 分布是否接近？
-```
-
-### 8.2 每個 n 先建立 n-gram count vector
-
-對 n = 1, 2, 3, 4：
-
-```python
-cand_ngrams = ngrams(cand, n)
-ref_ngrams = ngrams(ref, n)
-```
-
-每個 n-gram 的出現次數就是 vector 的值。
-
-範例：
-
-```text
-candidate 2-gram counts:
-raw red: 1
-red wound: 1
-wound bed: 1
-```
-
-### 8.3 cosine similarity
-
-對每個 n，程式計算 candidate vector 與 reference vector 的 cosine similarity：
-
-```text
-cosine = dot(candidate, reference) / (||candidate|| * ||reference||)
-```
-
-程式：
-
-```python
-dot = sum(cand_ngrams[key] * ref_ngrams[key] for key in keys)
-cand_norm = sqrt(sum(value * value for value in cand_ngrams.values()))
-ref_norm = sqrt(sum(value * value for value in ref_ngrams.values()))
-score_n = dot / (cand_norm * ref_norm)
-```
-
-如果 candidate 或 reference 沒有該 n-gram，該 n 的分數為 0。
-
-### 8.4 最終 CIDEr-lite
-
-四個 n 的 cosine similarity 平均：
-
-```text
-CIDEr-lite = (score_1 + score_2 + score_3 + score_4) / 4
-```
-
-### 8.5 解讀
-
-高 CIDEr-lite 表示：
-
-- candidate 和 reference 的 n-gram 分布相似。
-- 不只是有共同單字，連短詞組分布也接近。
-
-低 CIDEr-lite 可能表示：
-
-- 詞彙差異大。
-- 詞組順序不同。
-- candidate 太短，導致高階 n-gram 很少。
-
-注意：
-
-```text
-目前 CIDEr-lite 沒有使用整個資料集的 IDF 權重。
-```
-
-所以它不會把罕見、重要的醫學詞自動加權得更高。
-
-## 9. 多張圖片如何彙總
-
-每張 matched image 都會各自算四個分數。
-
-最後取平均：
-
-```python
-final_bleu4 = sum(image_bleu4) / matched_image_count
-final_rouge_l = sum(image_rouge_l) / matched_image_count
-final_meteor_lite = sum(image_meteor_lite) / matched_image_count
-final_cider_lite = sum(image_cider_lite) / matched_image_count
-```
-
-也就是：
-
-```text
-每張圖片權重相同。
-```
-
-不是依照文字長度加權，也不是依照類別加權。
-
-## 10. 分數範圍
-
-四個分數理論上主要落在：
-
-```text
-0 到 1
-```
-
-目前 `scores.md` 顯示時使用三位小數，例如：
-
-```text
-0.343
-```
-
-不是百分比，雖然欄位格式函式叫 `format_pct`。
-
-可粗略理解：
-
-```text
-越接近 1：candidate 越像 reference
-越接近 0：candidate 越不像 reference
-```
-
-但它們不是「醫學正確率」，也不是人工評分。
-
-## 11. 四個分數的差異總結
-
-| Score | 主要看什麼 | 優點 | 限制 |
+| Comparison | Reference | Candidate | Meaning |
 |---|---|---|---|
-| BLEU-4 | candidate n-gram precision + 短句懲罰 | 看詞組是否像 reference | 對同義詞、改寫很不友善 |
-| ROUGE-L | 最長共同子序列 F1 | 看順序接近程度 | 仍然只看 exact token match |
-| METEOR-lite | token overlap，recall 權重較高 | 比 BLEU 更重視覆蓋 reference | 沒有 synonym/stemming/chunk penalty |
-| CIDEr-lite | 1-4 gram count vector cosine 平均 | 看 n-gram 分布接近程度 | 沒有真正 CIDEr 的 TF-IDF weighting |
+| `AC` | `A` | `C` | English caption quality：local English vs SaaS/Gemini English reference |
+| `BD` | `B` | `D` | Chinese human-review view：translated local vs translated reference |
 
-## 12. 本專案目前解讀建議
+Diagnostic comparison 只有在加上 `--include-diagnostic` 時才跑：
 
-建議不要只看單一 score。
-
-比較合理的解讀方式：
-
-```text
-BLEU-4 高：文字和 reference 的片語很像。
-ROUGE-L 高：描述順序和 reference 接近。
-METEOR-lite 高：reference 的重要 token 覆蓋較多。
-CIDEr-lite 高：整體 n-gram 分布較接近。
-```
-
-如果四個分數都提升：
-
-```text
-可以初步認為 local output 更接近 SaaS reference。
-```
-
-如果只有 METEOR-lite 高，但 BLEU-4 低：
-
-```text
-可能 candidate 有提到類似關鍵詞，但句型、詞組或順序和 reference 不同。
-```
-
-如果 BLEU-4 很低，但人工看起來合理：
-
-```text
-可能是同義詞、改寫、描述粒度不同造成，不一定代表醫學描述錯。
-```
-
-## 13. 目前重要限制
-
-目前四個 score 都是 lexical score，也就是文字表面相似度。
-
-它們不能直接回答：
-
-```text
-這個模型是否醫學上正確？
-是否抓到所有關鍵傷口特徵？
-是否比 Gemini 更好？
-```
-
-它們只能回答：
-
-```text
-local output 和 SaaS reference 在目前抽取欄位上的文字相似程度。
-```
-
-因此正式報告中應該搭配：
-
-- JSON schema valid rate
-- required field completion rate
-- matched / unmatched image count
-- category-level score
-- 人工 review examples
-- image + visual summary comparison
-
-## 14. 未來可改進方向
-
-如果要讓 score 更接近醫學描述品質，可以考慮：
-
-- 對中文翻譯另寫中文 tokenizer。
-- 加入 synonym mapping，例如 `erythema = redness`。
-- 加入醫學關鍵詞 checklist score。
-- 對 wound category-specific features 做 field-level scoring。
-- 使用真正的 CIDEr / SPICE / BERTScore / embedding similarity。
-- 分開計算 `visual_summary`、`wound_features`、`category_specific_check` 的子分數。
-
-目前這版 score 適合當作 smoke test 的快速、自動化文字相似度指標；不適合單獨當作最終模型品質結論。
-
-## 15. BERTScore Grouped Semantic Comparison
-
-606 階段新增 `scripts/bertscore_rescore.py`，用 BERTScore 補充上述四個 lexical score。
-
-BERTScore 不看 exact n-gram overlap，而是使用 contextual token embedding 比較 candidate/reference 的語意相似度。它比較適合回答：
-
-```text
-兩段文字是否語意接近，即使用詞、句型或語言不同？
-```
-
-它仍然不能回答：
-
-```text
-影像描述是否醫學上正確？
-```
-
-### 15.1 Grouped Comparison Data
-
-606 階段不再把 BERTScore 拆成 source score / translation score 兩套。所有比較都放在同一份 grouped comparison report：
-
-| ID | Data | Meaning |
-|---|---|---|
-| `a` | reference English | SaaS / Gemini 原始英文 caption |
-| `b` | translated reference | SaaS / Gemini caption 的繁中翻譯 |
-| `c` | candidate English | local model 原始英文 caption |
-| `d` | translated candidate | local model caption 的繁中翻譯 |
-
-五組 comparison：
-
-| Comparison | Group | Meaning |
-|---|---|---|
-| `a_vs_c` | caption quality | local English caption 是否接近 SaaS English reference |
-| `a_vs_b` | translation faithfulness | reference translation 是否保留 reference English 語意 |
-| `c_vs_d` | translation faithfulness | candidate translation 是否保留 candidate English 語意 |
-| `a_vs_d` | human-review calibration | translated candidate 與 English reference 的語意距離 |
-| `b_vs_d` | human-review calibration | translated candidate 與 translated reference 的中文 review 情境 |
-
-這五組同等重要，只是回答不同問題。不要把它們壓成單一總分。
-
-### 15.2 BERTScore P / R / F1
-
-| Metric | Meaning |
+| Comparison | Meaning |
 |---|---|
-| `bertscore_precision` | candidate token 是否能被 reference 語意支持 |
-| `bertscore_recall` | reference token 是否被 candidate 語意覆蓋 |
-| `bertscore_f1` | precision / recall 的 harmonic mean |
+| `AB` | reference translation faithfulness |
+| `CD` | candidate translation faithfulness |
+| `AD` | translated candidate vs English reference |
 
-常見解讀：
+重點：
 
 ```text
-precision 低：candidate 可能加入 reference 沒有支持的內容。
-recall 低：candidate 可能漏掉 reference 的內容。
-F1：語意接近度摘要，但仍需依 comparison group 解讀。
+AC 和 BD 是兩個不同視角，不應平均成單一 final score。
 ```
 
-### 15.3 Text Extraction Rule
+## 4. Scoring Scope
 
-BERTScore 使用與目前四個 lexical score 相同的 `caption_text()` 欄位：
+每次 command 由 `--scopes` 指定要算哪個 scope。
+
+建議平常分開跑：
+
+```bash
+--scopes visual_summary_only
+--scopes full_caption_fields
+```
+
+若需要在同一份 report 內計算 `delta_f1`，才使用：
+
+```bash
+--scopes visual_summary_only,full_caption_fields
+```
+
+### 4.1 visual_summary_only
+
+只抽：
+
+```text
+caption.image_observation.visual_summary
+```
+
+用途：
+
+```text
+檢查模型自由描述的核心語意是否接近 reference。
+```
+
+### 4.2 full_caption_fields
+
+抽以下欄位並串成一段文字：
 
 ```text
 caption.image_observation.visual_summary
@@ -728,86 +145,132 @@ caption.wound_features.periwound_skin
 caption.category_specific_check.observed_supporting_features
 ```
 
-這樣 BERTScore 才能和 BLEU-4 / ROUGE-L / METEOR-lite / CIDEr-lite 放在同一個解讀脈絡。
-
-### 15.4 Category / Summary Calculation
-
-`scripts/bertscore_rescore.py` 的 report 有三層：
+用途：
 
 ```text
-by_image -> by_category -> summary
+檢查完整 structured wound caption 的語意接近度。
 ```
 
-每一組 comparison 都會獨立計算這三層。也就是：
+風險：
 
 ```text
-a_vs_c 有自己的 by_image / by_category / summary
-a_vs_b 有自己的 by_image / by_category / summary
-c_vs_d 有自己的 by_image / by_category / summary
-a_vs_d 有自己的 by_image / by_category / summary
-b_vs_d 有自己的 by_image / by_category / summary
+fixed short fields，例如 not observed / unknown / red / irregular，可能拉高或拉低整體分數。
 ```
 
-這五組不會互相平均，也不會壓成一個 final BERTScore。
+## 5. Raw BERTScore P / R / F1 是什麼意思？
 
-#### 15.4.1 Data Source Matching
+這是最容易誤解的地方。
 
-每一組 comparison 先根據 JSON 檔名 stem 配對。
-
-例如：
+在 raw BERTScore 裡：
 
 ```text
-runs/saas_simple_baseline/bruises (16).json
-runs/20260525_gemma4_26b/outputs/local/simple/bruises (16).json
+precision / recall 不是 classification precision / recall。
 ```
 
-兩邊 stem 都是：
+它們不是：
 
 ```text
-bruises (16)
+TP / (TP + FP)
+TP / (TP + FN)
 ```
 
-所以會成為 matched image。
-
-程式邏輯：
+它們是：
 
 ```text
-matched_images = sorted(set(reference_files) & set(candidate_files))
-unmatched_images = sorted(set(reference_files) ^ set(candidate_files))
+directional token-embedding similarity averages
 ```
 
-意思是：
+原論文 Section 3, PDF p.4 說明：BERTScore 先把 reference 和 candidate token 轉成 contextual embeddings，再計算 token 之間的 cosine similarity。每個 token 會在另一句中找最相似的 token。
 
-- `matched_image_count`: reference / candidate 兩邊都存在的圖片數。
-- `unmatched_image_count`: 只存在其中一邊的圖片數。
-- BERTScore 只會在 matched images 上計算。
-- unmatched images 會被記錄，但不直接拉低 P / R / F1。
+### 5.1 Raw Precision
 
-#### 15.4.2 Empty Text Filtering
-
-matched image 之後，程式會用 `caption_text()` 抽出要比較的文字。
-
-如果某張圖的 candidate text 或 reference text 是空字串，該 pair 不會進入 BERTScore batch。
-
-因此：
+`P_BERT` 的方向是：
 
 ```text
-matched_image_count >= scored_image_count
+candidate token -> reference token
 ```
 
-例如 report 中可能出現：
+意思：
 
 ```text
-matched_image_count = 43
-scored_image_count = 42
-empty_text_pair_count = 1
+candidate 產生的每個 token，在 reference 裡是否能找到語意相近的支持？
 ```
 
-這代表有 43 張圖片檔名配對成功，但只有 42 張有非空 caption text 可以計算。
+在本專案可解讀為：
 
-#### 15.4.3 Per-Image Score
+```text
+precision 較低時，candidate 可能加入 reference 沒有支持的內容。
+```
 
-每張有效圖片會得到三個數字：
+但注意：
+
+```text
+這仍然只是 embedding similarity，不是 hallucination detector。
+```
+
+### 5.2 Raw Recall
+
+`R_BERT` 的方向是：
+
+```text
+reference token -> candidate token
+```
+
+意思：
+
+```text
+reference 中的重要 token，在 candidate 裡是否能找到語意相近的覆蓋？
+```
+
+在本專案可解讀為：
+
+```text
+recall 較低時，candidate 可能漏掉 reference 描述的內容。
+```
+
+### 5.3 Raw F1
+
+`F_BERT` 是 raw precision 和 raw recall 的 harmonic mean：
+
+```text
+F_BERT = 2 * P_BERT * R_BERT / (P_BERT + R_BERT)
+```
+
+意思：
+
+```text
+同時考慮 candidate 是否被 reference 支持，以及 reference 是否被 candidate 覆蓋。
+```
+
+### 5.4 raw score 的尺度問題
+
+原論文 Section 3, Baseline Rescaling, PDF p.5 說明：raw BERTScore 使用 cosine similarity，理論範圍可在 `-1` 到 `1`，但實務上常落在較窄範圍。
+
+所以 raw `0.70` 不等於：
+
+```text
+70% correct
+70% token overlap
+70% medical correctness
+```
+
+它比較像：
+
+```text
+平均 token-level contextual embedding similarity 的 directional summary。
+```
+
+這也是為什麼原論文提出 rescaling：不是改變 ranking ability，而是增加 readability。
+
+### 5.5 本專案輸出欄位：normalized vs raw
+
+2026-07-03 後，`scripts/bertscore_rescore.py` 會在 BERTScore library 回傳 raw P/R/F1 後，再套一層固定標準化：
+
+```text
+normalized = clamp((raw + 1) / 2, 0, 1)
+```
+
+因此 report 裡主要欄位是 normalized score：
 
 ```text
 bertscore_precision
@@ -815,43 +278,132 @@ bertscore_recall
 bertscore_f1
 ```
 
-它們會記錄在 JSON 的：
+原始 BERTScore library output 會保留在：
 
 ```text
-summary.<comparison_id>.by_image[]
+raw_bertscore_precision
+raw_bertscore_recall
+raw_bertscore_f1
 ```
 
-每個 `by_image` row 會包含：
-
-| Field | Meaning |
-|---|---|
-| `image` | JSON stem / image id |
-| `category` | 該圖片分類 |
-| `bertscore_precision` | 該圖片 pair 的 precision |
-| `bertscore_recall` | 該圖片 pair 的 recall |
-| `bertscore_f1` | 該圖片 pair 的 F1 |
-| `candidate_text` | BERTScore candidate text |
-| `reference_text` | BERTScore reference text |
-
-#### 15.4.4 Category Label Rule
-
-每張圖的 category 由 candidate bundle 優先提供。
-
-程式順序：
+意思：
 
 ```text
-metadata.target_category
-metadata.raw_category
-caption.category_specific_check.target_category
-filename prefix before " ("
-"unknown"
+bertscore_*     = 方便閱讀的 0-1 標準化版本
+raw_bertscore_* = 原始 cosine-like BERTScore output
 ```
 
-也就是說，如果 JSON metadata 裡有 `target_category`，就用它。若沒有，才依序 fallback 到其他欄位。
+注意：
 
-#### 15.4.5 Category Score
+```text
+normalized 0.85 不等於 85% correct。
+它只是把 raw cosine-like 分數從 -1~1 線性映射到 0~1。
+```
 
-Category table 是在同一個 comparison group 內，依 category 分組後取平均。
+## 6. Rescale 是什麼？
+
+原論文 Section 3, Baseline Rescaling, PDF p.5 說明：
+
+- raw BERTScore 的實際值常落在窄範圍，不易讀。
+- 作者用 Common Crawl monolingual data 建立 random candidate-reference pairs。
+- 這些 random pairs 語意重疊很低。
+- 將它們的平均 BERTScore 當作 empirical lower bound `b`。
+- 再線性 rescale：
+
+```text
+R̂_BERT = (R_BERT - b) / (1 - b)
+```
+
+同樣方法用於 `P̂_BERT` 和 `F̂_BERT`。
+
+重要解讀：
+
+```text
+rescale 只是增加 score readability。
+原論文說它不影響 ranking ability / human correlation。
+```
+
+本專案目前預設：
+
+```text
+rescale_with_baseline = False
+```
+
+所以目前不使用原論文 baseline rescaling。專案 report 的主 P/R/F1 是本專案後處理的 0-1 normalized score，raw 值另存於 `raw_bertscore_*`。
+
+## 7. Delta F1
+
+只有當同一份 report 同時包含 `visual_summary_only` 和 `full_caption_fields` 時，才會算：
+
+```text
+delta_f1 = full_caption_fields_f1 - visual_summary_only_f1
+```
+
+解讀：
+
+| Flag | Rule | Meaning |
+|---|---|---|
+| `none` | `abs(delta_f1) < 0.05` | structured fields 沒有明顯影響 |
+| `noticeable` | `abs(delta_f1) >= 0.05` | structured fields 對分數有可見影響 |
+| `strong` | `abs(delta_f1) >= 0.10` | structured fields 可能明顯拉高或拉低 |
+
+這個 delta 是 620 階段加上的 calibration tool，用來避免 `full_caption_fields` 被固定欄位誤導。
+
+如果你用兩個獨立 command 分開跑 scope，兩份 report 內不會自動有 `delta_f1`。這時候兩個 scope 的比較要在外部 summary 或人工 review 中對照。
+
+## 8. Matching / Empty Text / Summary 怎麼算
+
+### 8.1 Matching
+
+script 以 JSON stem 配對：
+
+```text
+matched_images = sorted(set(reference_files) & set(candidate_files))
+unmatched_images = sorted(set(reference_files) ^ set(candidate_files))
+```
+
+BERTScore 只在 matched images 上計算。unmatched image 會記錄，但不直接拉低 P/R/F1。
+
+### 8.2 Empty Text Filtering
+
+matched image 之後，script 依 scope 抽文字：
+
+```text
+visual_summary_only -> visual_summary_text()
+full_caption_fields -> caption_text()
+```
+
+如果 reference 或 candidate 文字為空，該 pair 不進入 BERTScore batch。
+
+因此：
+
+```text
+matched_image_count >= scored_image_count
+```
+
+### 8.3 Per-Image Score
+
+每張有效圖片會得到：
+
+```text
+bertscore_precision
+bertscore_recall
+bertscore_f1
+reference_text
+candidate_text
+```
+
+位置：
+
+```text
+summary.<comparison_id>.scopes.<scope>.by_image[]
+```
+
+Markdown report 也會列出 per-image evidence，方便人工檢查。
+
+### 8.4 Category Score
+
+Category table 是在同一個 comparison + scope 內，依 category 分組後平均。
 
 公式：
 
@@ -864,23 +416,21 @@ category_f1        = mean(image_f1        for images in this category)
 範例：
 
 ```text
-a_vs_c / bruises
+AC / full_caption_fields / bruises
 ```
 
-只會平均 `a_vs_c` 裡 category 是 `bruises` 的圖片，不會混入 `a_vs_b` 或其他 comparison。
+只會平均 `AC` + `full_caption_fields` 中 category 是 `bruises` 的圖片，不會混入 `BD` 或 `visual_summary_only`。
 
-Category table 的 `Count` 是該 category 被實際 scored 的圖片數，不是整個 dataset 的 category 總數。
+### 8.5 Summary Score
 
-#### 15.4.6 Summary Score
-
-Summary table 是同一個 comparison group 內，對所有 scored images 取平均。
+Summary score 是同一個 comparison + scope 內，對所有 scored images 平均。
 
 公式：
 
 ```text
-summary_precision = mean(image_precision for all scored images in this comparison)
-summary_recall    = mean(image_recall    for all scored images in this comparison)
-summary_f1        = mean(image_f1        for all scored images in this comparison)
+summary_precision = mean(image_precision for all scored images in this comparison + scope)
+summary_recall    = mean(image_recall    for all scored images in this comparison + scope)
+summary_f1        = mean(image_f1        for all scored images in this comparison + scope)
 ```
 
 注意：
@@ -890,81 +440,157 @@ summary_f1 不是 category_f1 的平均。
 summary_f1 是所有 scored image 的 image-level F1 平均。
 ```
 
-所以如果某個 category 圖片比較多，它自然會在 summary 中佔比較多權重。
+## 9. 原論文 COCO Image Captioning 實驗
 
-#### 15.4.7 Skipped Group
+原論文 Section 4, PDF p.6 的 image-captioning 實驗使用 COCO 2015 Captioning Challenge。
 
-如果某組 comparison 沒有 matched image，狀態會是：
+### 9.1 Dataset / System Setup
 
-```text
-skipped_no_matched_images
-```
+paper 說明：
 
-如果有 matched image，但抽出的 `caption_text()` 全部為空，狀態會是：
+- 使用 12 個 COCO 2015 Captioning Challenge submission entries。
+- 每個 participating system 會替 COCO validation set 的每張 image 產生一個 caption。
+- 每張 image 約有 5 個 human reference captions。
 
-```text
-skipped_no_nonempty_caption_text
-```
-
-如果正常計算，狀態會是：
+paper 位置：
 
 ```text
-scored
+Section 4 Experimental Setup - Image Captioning, PDF p.6
 ```
 
-#### 15.4.8 Lowest / Highest Examples
+### 9.2 Human Judgment
 
-Markdown report 的 lowest / highest examples 是依照該 comparison group 的 `bertscore_f1` 排序：
+原論文跟隨 Cui et al. (2018)，使用兩個 system-level human judgment metrics：
 
-```text
-lowest 3  = F1 最低的三張圖
-highest 3 = F1 最高的三張圖
-```
-
-這一區只用來快速抽查案例，不參與 summary score 計算。
-
-### 15.5 Embedding Part
-
-BERTScore 的 embedding part 大致是：
-
-1. 用 tokenizer 將 candidate/reference 切成 tokens。
-2. 用指定 embedding model 將每個 token 轉成 contextual embedding。
-3. 計算 candidate token 與 reference token embedding 的 cosine similarity。
-4. 用 token-level maximum similarity 形成 precision 與 recall。
-5. 再用 precision / recall 算 F1。
-
-因此它比 exact token overlap 更能處理：
-
-- synonym
-- paraphrase
-- word order difference
-- mixed Chinese-English text
-
-### 15.6 可設定參數
-
-| Parameter | Meaning |
+| Human Metric | Meaning |
 |---|---|
-| `model_type` | embedding model，例如 `bert-base-multilingual-cased` |
-| `num_layers` | 使用第幾層 hidden states |
-| `lang` | 語言設定 |
-| `idf` | 是否啟用 IDF weighting |
-| `rescale_with_baseline` | 是否用 baseline rescale 分數 |
-| `batch_size` | 批次大小 |
-| `device` | `cpu` 或 `cuda` |
-| `use_fast_tokenizer` | 是否使用 fast tokenizer |
+| `M1` | captions 被評為 better or equal to human captions 的比例 |
+| `M2` | captions 被評為 indistinguishable from human captions 的比例 |
 
-606 grouped comparison 預設使用 multilingual model，因為資料同時包含 English、Chinese、mixed Chinese-English text。
+這代表 Table 5 不是在看單張 image pair 的品質，而是看每個 system 的整體 human-rated quality。
 
-目前建議：
+### 9.3 Multiple References 怎麼算
+
+COCO 每張圖有多個 reference captions。原論文 Section 4, PDF p.6 說：
 
 ```text
-model_type = bert-base-multilingual-cased
-rescale_with_baseline = False
-idf = False
+compute BERTScore with multiple references by scoring the candidate with each available reference and returning the highest score
 ```
 
-原因：
+也就是：
 
-- smoke set 小，IDF 不穩定。
-- multilingual baseline rescale 是否適合需要先驗證。
-- mixed-language output 是預期行為，不應被英文-only model 懲罰。
+```text
+image_score = max(BERTScore(candidate, reference_i) for reference_i in references)
+```
+
+這和本專案目前不同。本專案目前通常是：
+
+```text
+one candidate JSON vs one reference JSON
+```
+
+所以本專案 score 可能比 COCO-style multi-reference 更嚴格，因為沒有五個 human references 可取 max。
+
+### 9.4 Table 5 到底報什麼
+
+原論文 Table 5, PDF p.8 報的是：
+
+```text
+Pearson correlation between metric scores and system-level human metrics M1/M2
+```
+
+不是：
+
+```text
+caption pair raw BERTScore
+```
+
+Table 5 部分數字：
+
+| Metric | M1 | M2 |
+|---|---:|---:|
+| BLEU | -0.019 | -0.005 |
+| METEOR | 0.606 | 0.594 |
+| ROUGE-L | 0.090 | 0.096 |
+| CIDEr | 0.438 | 0.440 |
+| SPICE | 0.759 | 0.750 |
+| LEIC | 0.939 | 0.949 |
+| RBERT | 0.888 | 0.863 |
+| FBERT | 0.322 | 0.350 |
+| RBERT(idf) | 0.917 | 0.889 |
+
+paper 位置：
+
+```text
+Table 5, PDF p.8
+```
+
+重點：
+
+```text
+Table 5 的 0.888 / 0.917 是 correlation，不是 BERTScore 本身。
+不能拿 Table 5 直接說 pair-level BERTScore 0.70-0.75 是否 good。
+```
+
+### 9.5 COCO 結果對本專案能支持什麼
+
+能支持：
+
+```text
+BERTScore 類方法在 image captioning system-level evaluation 上可與 human judgment 有高 correlation。
+```
+
+不能支持：
+
+```text
+0.70-0.75 是 wound captioning 的通用合格門檻。
+```
+
+## 10. 0.70-0.75 如何解讀
+
+若本專案 report 使用 normalized BERTScore，且 `rescale_with_baseline = False`：
+
+```text
+0.70-0.75 = normalized semantic overlap signal，但不能直接說足夠好。
+```
+
+更精確：
+
+```text
+normalized P/R/F1 是 raw token embedding similarity summary 經 (raw + 1) / 2 後的閱讀版，不是百分比正確率。
+```
+
+建議寫法：
+
+```text
+BERTScore 0.70-0.75 is treated as an exploratory semantic-similarity signal.
+The original BERTScore paper validates correlation with human judgments, not a universal absolute threshold.
+Therefore, this score range must be calibrated with per-image evidence, schema validity, VQA-style checks, and human review.
+```
+
+## 11. Report 解讀 Checklist
+
+看 BERTScore report 時，照這個順序：
+
+1. 先確認 A/B/C/D path 是否正確。
+2. 看 AC，不要先看 BD。
+3. 看 `visual_summary_only`，確認自由描述本身是否接近。
+4. 看 `full_caption_fields`，確認 structured fields 是否改變分數。
+5. 看 `delta_f1`：
+   - full 比 visual 高很多：可能被固定欄位拉高。
+   - full 比 visual 低很多：structured fields 可能揭露更多差異。
+6. 看 per-image evidence text，不要只看 summary。
+7. 再看 BD，確認中文 review 視角是否和 AC 一致。
+8. 最後才做 human conclusion。
+
+## 12. Paper Evidence
+
+| Claim | Evidence |
+|---|---|
+| BERTScore 是 contextual embedding token similarity | Section 3, PDF p.4 |
+| Raw P/R/F1 是 directional max cosine similarity averages | Section 3, PDF p.4 |
+| Baseline rescaling 只為 readability，不改 ranking/correlation | Section 3 Baseline Rescaling, PDF p.5 |
+| 作者建議 F1 作為穩定 measure | Section 5 Results, PDF p.7 |
+| COCO image-captioning 使用 12 systems、COCO validation、約 5 references/image | Section 4 Image Captioning, PDF p.6 |
+| COCO multiple references 是 candidate 對每個 reference scoring 後取最高 | Section 4 Image Captioning, PDF p.6 |
+| COCO Table 5 報 Pearson correlation，不是 pair-level BERTScore | Table 5, PDF p.8 |

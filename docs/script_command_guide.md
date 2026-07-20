@@ -5,7 +5,8 @@ This is the central command guide for the project. The stage scripts under `scri
 Core rule:
 
 ```text
-All run-specific results must stay inside the selected --run-dir.
+All single-run results must stay inside the selected --run-dir.
+Cross-run or explicitly sourced comparison reports may live under runs/<report_root>/.
 ```
 
 New run naming rule:
@@ -31,15 +32,17 @@ runs/20260525_gemma4_26b
 | 5 | `scripts/generate_saas.py` | Generate Gemini/SaaS outputs |
 | 6 | `scripts/score.py` | Score local outputs against standard SaaS simple baseline |
 | 7 | `scripts/bertscore_rescore.py` | Compute grouped BERTScore semantic comparisons |
-| 8 | `scripts/charts.py` | Generate run-local charts |
-| 9 | `scripts/run_all.py` | Optional one-command pipeline run |
-| 10 | `scripts/metadata.py` | Build run-local metadata report |
-| 11 | `scripts/translate.py` | Translate all output captions with local Ollama model |
-| 12 | `scripts/compare_visual_summary_translations.py` | Compare translated visual summaries across 510 local, 523 local, and SaaS simple |
-| 13 | `scripts/fix_charts.py` | Rewrite chart PNGs with clearer labels |
-| 14 | `docs/score_calculation_guide.md` | Explain current BLEU-4, ROUGE-L, METEOR-lite, CIDEr-lite, and BERTScore calculations |
-| 15 | Validation | Static command checks |
-| 16 | Update Record | Record when scripts are added or changed |
+| 8 | `scripts/build_vqa_dataset.py` | Build deterministic visual-summary MCQ dataset |
+| 9 | `scripts/analyze_schema_fields.py` | Analyze schema fields for reduction planning |
+| 10 | `scripts/charts.py` | Generate run-local charts |
+| 11 | `scripts/run_all.py` | Optional one-command pipeline run |
+| 12 | `scripts/metadata.py` | Build run-local metadata report |
+| 13 | `scripts/translate.py` | Translate all output captions with local Ollama model |
+| 14 | `scripts/compare_visual_summary_translations.py` | Compare translated visual summaries across 510 local, 523 local, and SaaS simple |
+| 15 | `scripts/fix_charts.py` | Rewrite chart PNGs with clearer labels |
+| 16 | `docs/score_calculation_guide.md` | Explain current BLEU-4, ROUGE-L, METEOR-lite, CIDEr-lite, and BERTScore calculations |
+| 17 | Validation | Static command checks |
+| 18 | Update Record | Record when scripts are added or changed |
 
 ## 1. Standard Form
 
@@ -244,19 +247,46 @@ Meaning:
 Purpose:
 
 - Does not call any generation model.
-- Reads existing English outputs, translated outputs, and the standard SaaS simple baseline.
-- Computes grouped BERTScore comparisons for `a/b/c/d` data.
-- Writes run-local semantic comparison artifacts.
+- Reads explicit `A/B/C/D` source folders only.
+- Computes BERTScore for `AC` and `BD`.
+- Computes the selected scoring scope.
+- `visual_summary_only` and `full_caption_fields` should usually be run as separate commands for independent reports.
+- Writes independent semantic comparison artifacts under `runs/bertscore_reports/`.
 
-Command:
+Command: visual summary only
 
 ```bash
 python scripts/bertscore_rescore.py \
   --run-dir runs/20260525_gemma4_26b \
-  --translation-root runs/20260525_gemma4_26b/output_translation \
+  --reference-dir runs/saas_simple_baseline \
+  --reference-translation-dir runs/510_smoke_v1/output_translation/saas/simple \
+  --candidate-dir runs/20260525_gemma4_26b/outputs/local/simple \
+  --candidate-translation-dir runs/20260525_gemma4_26b/output_translation/local/simple \
   --provider local \
   --mode simple \
   --score-type grouped \
+  --scopes visual_summary_only \
+  --output-dir runs/bertscore_reports \
+  --report-id 20260525_gemma4_26b_local_simple_vs_saas_simple_visual_summary_only \
+  --lang zh \
+  --model-type bert-base-multilingual-cased
+```
+
+Command: full caption fields
+
+```bash
+python scripts/bertscore_rescore.py \
+  --run-dir runs/20260525_gemma4_26b \
+  --reference-dir runs/saas_simple_baseline \
+  --reference-translation-dir runs/510_smoke_v1/output_translation/saas/simple \
+  --candidate-dir runs/20260525_gemma4_26b/outputs/local/simple \
+  --candidate-translation-dir runs/20260525_gemma4_26b/output_translation/local/simple \
+  --provider local \
+  --mode simple \
+  --score-type grouped \
+  --scopes full_caption_fields \
+  --output-dir runs/bertscore_reports \
+  --report-id 20260525_gemma4_26b_local_simple_vs_saas_simple_full_caption_fields \
   --lang zh \
   --model-type bert-base-multilingual-cased
 ```
@@ -264,26 +294,38 @@ python scripts/bertscore_rescore.py \
 Outputs:
 
 ```text
-runs/20260525_gemma4_26b/bertscore_comparisons.json
-runs/20260525_gemma4_26b/bertscore_comparisons.md
+runs/bertscore_reports/<report-id>_<timestamp>.json
+runs/bertscore_reports/<report-id>_<timestamp>.md
 ```
 
 Meaning:
 
-- `a_vs_c`: caption quality, local English caption vs SaaS English reference.
-- `a_vs_b`: reference translation faithfulness.
-- `c_vs_d`: candidate translation faithfulness.
-- `a_vs_d`: cross-lingual candidate-to-reference calibration.
-- `b_vs_d`: translated review calibration.
-- These groups are separate and must not be compressed into one final score.
+- `AC`: caption quality, candidate English caption vs SaaS English reference.
+- `BD`: human-review comparison, translated candidate vs translated reference.
+- `visual_summary_only`: only `caption.image_observation.visual_summary`.
+- `full_caption_fields`: visual summary plus structured wound fields.
+- Main `bertscore_precision`, `bertscore_recall`, and `bertscore_f1` values are normalized with `(raw + 1) / 2`.
+- Raw BERTScore values are preserved as `raw_bertscore_precision`, `raw_bertscore_recall`, and `raw_bertscore_f1`.
+- `--scopes`: chooses which scope to compute. Use `visual_summary_only`, `full_caption_fields`, or both with comma.
+- `delta_f1`: full-field F1 minus visual-summary F1. It is available only when both scopes are computed in the same report.
+- AC and BD are separate and must not be compressed into one final score.
 - Mixed Chinese-English text is expected when English medical terms are intentionally preserved.
-- Grouped mode requires all four data sources. If the selected run does not contain `output_translation/`, the script auto-searches `runs/*/output_translation/<provider>/<mode>` and chooses the folder with the most matching JSON filenames.
-- If any `a/b/c/d` source is still missing, the script stops with a clear error. Use `--allow-partial` only when an intentionally incomplete report is needed.
+- All four `A/B/C/D` folders must be specified explicitly.
+- The script intentionally does not auto-search other run folders because that can mix unrelated experiments.
+- If `20260525` only has local/simple output and no translation, run `scripts/translate.py` for that run first.
 
 Common parameters:
 
 | Argument | Meaning |
 |---|---|
+| `--reference-dir` | A source: reference English caption JSON folder |
+| `--reference-translation-dir` | B source: translated reference caption JSON folder |
+| `--candidate-dir` | C source: candidate English caption JSON folder |
+| `--candidate-translation-dir` | D source: translated candidate caption JSON folder |
+| `--scopes` | `visual_summary_only`, `full_caption_fields`, or comma-separated both |
+| `--output-dir` | Independent report folder, default `runs/bertscore_reports` |
+| `--report-id` | Filename prefix for traceability |
+| `--include-diagnostic` | Also score AB/CD/AD diagnostic comparisons |
 | `--model-type` | BERTScore embedding model |
 | `--num-layers` | Embedding layer |
 | `--lang` | Language setting |
@@ -293,9 +335,69 @@ Common parameters:
 | `--device` | `cpu` or `cuda` |
 | `--use-fast-tokenizer` | Use fast tokenizer |
 | `--limit` | Optional small dry-run limit |
-| `--allow-partial` | Allow incomplete `a/b/c/d` sources and score only available groups |
 
-## 8. Generate Charts
+## 8. Build VQA Dataset
+
+Purpose:
+
+- Does not call any model.
+- Reads one run's generated captions.
+- Builds deterministic multiple-choice VQA rows from `visual_summary`.
+
+Command:
+
+```bash
+python scripts/build_vqa_dataset.py \
+  --run-dir runs/20260525_gemma4_26b \
+  --provider local \
+  --mode simple
+```
+
+Outputs:
+
+```text
+runs/20260525_gemma4_26b/vqa_dataset/20260525_gemma4_26b_local_simple_visual_summary_vqa.jsonl
+runs/20260525_gemma4_26b/vqa_dataset/20260525_gemma4_26b_local_simple_visual_summary_vqa_summary.json
+runs/20260525_gemma4_26b/vqa_dataset/20260525_gemma4_26b_local_simple_visual_summary_vqa_summary.md
+```
+
+Meaning:
+
+- This is a first deterministic VQA-style dataset.
+- Answer comes from `metadata.target_category`.
+- Evidence comes from `caption.image_observation.visual_summary`.
+- It is not yet a formal benchmark.
+
+## 9. Analyze Schema Fields
+
+Purpose:
+
+- Does not call any model.
+- Reads generated JSON outputs.
+- Reports field presence, fixed-value patterns, and rough text cost.
+- Helps decide schema reduction candidates.
+
+Command:
+
+```bash
+python scripts/analyze_schema_fields.py \
+  --run-dir runs/20260525_gemma4_26b
+```
+
+Outputs:
+
+```text
+runs/20260525_gemma4_26b/schema_analysis/20260525_gemma4_26b_schema_field_analysis.json
+runs/20260525_gemma4_26b/schema_analysis/20260525_gemma4_26b_schema_field_analysis.md
+```
+
+Meaning:
+
+- `consider optional/remove` means a field is often empty.
+- `possible fixed field; inspect` means the field may be too template-like.
+- This script does not change prompt/schema by itself.
+
+## 10. Generate Charts
 
 Purpose:
 
@@ -316,7 +418,7 @@ Outputs:
 runs/20260525_gemma4_26b/charts/*.png
 ```
 
-## 9. Optional Run-All
+## 11. Optional Run-All
 
 Purpose:
 
@@ -344,7 +446,7 @@ python scripts/run_all.py \
   --saas-simple-baseline-dir runs/saas_simple_baseline
 ```
 
-## 10. Metadata Report
+## 12. Metadata Report
 
 Purpose:
 
@@ -365,7 +467,7 @@ Outputs:
 runs/20260525_gemma4_26b/20260525_gemma4_26b_record_summary.md
 ```
 
-## 11. Caption Translation
+## 13. Caption Translation
 
 Purpose:
 
@@ -402,7 +504,7 @@ Meaning:
 - Translation is for human review and grouped BERTScore comparison only.
 - Translation must not be used for the lexical `scores.json` / `scores.md` calculation.
 
-## 12. Visual Summary Translation Comparison
+## 14. Visual Summary Translation Comparison
 
 Purpose:
 
@@ -430,7 +532,7 @@ Meaning:
 - It does not modify original outputs.
 - It does not participate in scoring.
 
-## 13. Chart Fix
+## 15. Chart Fix
 
 Purpose:
 
@@ -451,7 +553,7 @@ runs/20260525_gemma4_26b/charts/*.png
 runs/20260525_gemma4_26b/charts/_backup_before_523_fix/*.png
 ```
 
-## 14. Score Calculation Guide
+## 16. Score Calculation Guide
 
 Purpose:
 
@@ -470,7 +572,7 @@ Meaning:
 - Use this document when interpreting `scores.json` and `scores.md`.
 - It explains what the scores can and cannot prove.
 
-## 15. Validation
+## 17. Validation
 
 Static validation:
 
@@ -484,6 +586,8 @@ python -m py_compile \
   scripts/generate_saas.py \
   scripts/score.py \
   scripts/bertscore_rescore.py \
+  scripts/build_vqa_dataset.py \
+  scripts/analyze_schema_fields.py \
   scripts/charts.py \
   scripts/run_all.py \
   scripts/metadata.py \
@@ -498,7 +602,7 @@ Legacy pipeline command list:
 python -m pipeline --help
 ```
 
-## 16. Update Record
+## 18. Update Record
 
 | Date | Command / Script | Change |
 |---|---|---|
@@ -514,3 +618,6 @@ python -m pipeline --help
 | 2026-05-25 | `scripts/translate.py` | Added per-translation local usage metadata and automatic `output_translation/<run-name>_translation_summary.md` report generation. |
 | 2026-06-06 | `scripts/bertscore_rescore.py` | Added grouped BERTScore semantic comparison for caption quality, translation faithfulness, and human-review calibration. |
 | 2026-06-06 | `docs/score_calculation_guide.md` | Added BERTScore grouped semantic comparison explanation and parameter table. |
+| 2026-06-21 | `scripts/bertscore_rescore.py` | Removed cross-run translation auto-discovery; A/B/C/D source folders must be explicit; output now goes to independent `runs/bertscore_reports/`; added visual-summary/full-field evidence and delta flags. |
+| 2026-06-21 | `scripts/build_vqa_dataset.py` | Added deterministic visual-summary MCQ dataset generator. |
+| 2026-06-21 | `scripts/analyze_schema_fields.py` | Added schema field reduction analysis report. |

@@ -1,12 +1,12 @@
 import argparse
 import json
+import re
 from collections import defaultdict
 from datetime import datetime
 from pathlib import Path
 from typing import Any
 
 
-DEFAULT_REFERENCE_DIR = Path("runs/saas_simple_baseline")
 CAPTION_FIELDS = [
     "caption.image_observation.visual_summary",
     "caption.wound_features.shape_pattern",
@@ -19,35 +19,14 @@ CAPTION_FIELDS = [
     "caption.category_specific_check.observed_supporting_features",
 ]
 COMPARISONS = {
-    "a_vs_c": {
+    "AC": {
         "group": "caption_quality",
         "name": "caption_source_score",
         "reference_key": "a_reference_english",
         "candidate_key": "c_candidate_english",
         "meaning": "local English caption vs SaaS/Gemini English reference",
     },
-    "a_vs_b": {
-        "group": "translation_faithfulness",
-        "name": "reference_translation_faithfulness",
-        "reference_key": "a_reference_english",
-        "candidate_key": "b_translated_reference",
-        "meaning": "translated reference vs original English reference",
-    },
-    "c_vs_d": {
-        "group": "translation_faithfulness",
-        "name": "candidate_translation_faithfulness",
-        "reference_key": "c_candidate_english",
-        "candidate_key": "d_translated_candidate",
-        "meaning": "translated candidate vs original English candidate",
-    },
-    "a_vs_d": {
-        "group": "human_review_calibration",
-        "name": "crosslingual_candidate_to_reference",
-        "reference_key": "a_reference_english",
-        "candidate_key": "d_translated_candidate",
-        "meaning": "translated candidate vs English reference",
-    },
-    "b_vs_d": {
+    "BD": {
         "group": "human_review_calibration",
         "name": "translated_review_score",
         "reference_key": "b_translated_reference",
@@ -55,6 +34,30 @@ COMPARISONS = {
         "meaning": "translated candidate vs translated reference",
     },
 }
+DIAGNOSTIC_COMPARISONS = {
+    "AB": {
+        "group": "translation_faithfulness",
+        "name": "reference_translation_faithfulness",
+        "reference_key": "a_reference_english",
+        "candidate_key": "b_translated_reference",
+        "meaning": "translated reference vs original English reference",
+    },
+    "CD": {
+        "group": "translation_faithfulness",
+        "name": "candidate_translation_faithfulness",
+        "reference_key": "c_candidate_english",
+        "candidate_key": "d_translated_candidate",
+        "meaning": "translated candidate vs original English candidate",
+    },
+    "AD": {
+        "group": "human_review_calibration",
+        "name": "crosslingual_candidate_to_reference",
+        "reference_key": "a_reference_english",
+        "candidate_key": "d_translated_candidate",
+        "meaning": "translated candidate vs English reference",
+    },
+}
+SCOPES = ("visual_summary_only", "full_caption_fields")
 
 
 def parse_args() -> argparse.Namespace:
@@ -65,11 +68,38 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--provider", default="local")
     parser.add_argument("--mode", default="simple")
     parser.add_argument("--score-type", choices=["grouped"], default="grouped")
-    parser.add_argument("--reference-dir", default=str(DEFAULT_REFERENCE_DIR))
-    parser.add_argument("--translation-root", default=None)
-    parser.add_argument("--reference-translation-dir", default=None)
-    parser.add_argument("--candidate-dir", default=None)
-    parser.add_argument("--candidate-translation-dir", default=None)
+    parser.add_argument(
+        "--reference-dir",
+        required=True,
+        help="A source: reference English JSON directory.",
+    )
+    parser.add_argument(
+        "--reference-translation-dir",
+        required=True,
+        help="B source: translated reference JSON directory.",
+    )
+    parser.add_argument(
+        "--candidate-dir",
+        required=True,
+        help="C source: candidate English JSON directory.",
+    )
+    parser.add_argument(
+        "--candidate-translation-dir",
+        required=True,
+        help="D source: translated candidate JSON directory.",
+    )
+    parser.add_argument(
+        "--output-dir",
+        default="runs/bertscore_reports",
+        help="Independent output folder. Do not put BERTScore reports inside a single run folder.",
+    )
+    parser.add_argument("--report-id", default=None)
+    parser.add_argument("--include-diagnostic", action="store_true")
+    parser.add_argument(
+        "--scopes",
+        default="visual_summary_only,full_caption_fields",
+        help="Comma-separated scoring scopes: visual_summary_only, full_caption_fields.",
+    )
     parser.add_argument("--lang", default="zh")
     parser.add_argument("--model-type", default="bert-base-multilingual-cased")
     parser.add_argument("--num-layers", type=int, default=None)
@@ -79,12 +109,23 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--device", default=None)
     parser.add_argument("--use-fast-tokenizer", action="store_true")
     parser.add_argument("--limit", type=int, default=0)
-    parser.add_argument(
-        "--allow-partial",
-        action="store_true",
-        help="Allow missing a/b/c/d sources and score only available comparison groups.",
-    )
-    return parser.parse_args()
+    args = parser.parse_args()
+    args.selected_scopes = parse_scopes(args.scopes)
+    return args
+
+
+def parse_scopes(value: str) -> list[str]:
+    scopes = [scope.strip() for scope in value.split(",") if scope.strip()]
+    invalid = [scope for scope in scopes if scope not in SCOPES]
+    if invalid:
+        raise SystemExit(
+            "Invalid --scopes value: "
+            + ", ".join(invalid)
+            + f". Valid scopes: {', '.join(SCOPES)}"
+        )
+    if not scopes:
+        raise SystemExit("--scopes must include at least one scope.")
+    return scopes
 
 
 def read_json(path: Path) -> dict[str, Any]:
@@ -119,6 +160,23 @@ def caption_text(bundle: dict[str, Any]) -> str:
     return " ".join(str(part) for part in parts if part).strip()
 
 
+def visual_summary_text(bundle: dict[str, Any]) -> str:
+    return str(
+        bundle.get("caption", {})
+        .get("image_observation", {})
+        .get("visual_summary", "")
+        or ""
+    ).strip()
+
+
+def text_for_scope(bundle: dict[str, Any], scope: str) -> str:
+    if scope == "visual_summary_only":
+        return visual_summary_text(bundle)
+    if scope == "full_caption_fields":
+        return caption_text(bundle)
+    raise ValueError(f"Unknown BERTScore scope: {scope}")
+
+
 def category_for(bundle: dict[str, Any], fallback_name: str) -> str:
     metadata = bundle.get("metadata", {})
     caption = bundle.get("caption", {})
@@ -150,79 +208,6 @@ def json_stems(path: Path) -> set[str]:
     return {json_path.stem for json_path in path.glob("*.json")}
 
 
-def runs_root_for(run_dir: Path) -> Path:
-    return run_dir.parent if run_dir.parent.name == "runs" else Path("runs")
-
-
-def candidate_translation_dirs(runs_root: Path, provider: str, mode: str) -> list[Path]:
-    candidates = []
-    if runs_root.exists():
-        candidates.extend(sorted(runs_root.glob(f"*/output_translation/{provider}/{mode}")))
-    return candidates
-
-
-def normalize_model_name(model: str | None) -> str:
-    return str(model or "").lower().replace(":", "_").replace("-", "_")
-
-
-def first_model_in_dir(path: Path) -> str:
-    for json_path in sorted(path.glob("*.json")):
-        try:
-            bundle = read_json(json_path)
-        except json.JSONDecodeError:
-            continue
-        model = bundle.get("metadata", {}).get("model")
-        if model:
-            return str(model)
-    return ""
-
-
-def first_translation_source_model_in_dir(path: Path) -> str:
-    for json_path in sorted(path.glob("*.json")):
-        try:
-            bundle = read_json(json_path)
-        except json.JSONDecodeError:
-            continue
-        metadata = bundle.get("metadata", {})
-        source_model = metadata.get("translation", {}).get("source_model") or metadata.get("model")
-        if source_model:
-            return str(source_model)
-    return ""
-
-
-def resolve_translation_dir(
-    preferred: Path,
-    source_dir: Path,
-    runs_root: Path,
-    provider: str,
-    mode: str,
-    source_model: str = "",
-) -> tuple[Path, str, int]:
-    source_stems = json_stems(source_dir)
-    if preferred.exists():
-        return preferred, "provided", len(source_stems & json_stems(preferred))
-
-    best_path = preferred
-    best_overlap = 0
-    best_model_match = False
-    expected_model = normalize_model_name(source_model)
-    for candidate in candidate_translation_dirs(runs_root, provider, mode):
-        overlap = len(source_stems & json_stems(candidate))
-        candidate_model = normalize_model_name(first_translation_source_model_in_dir(candidate))
-        model_match = bool(expected_model and candidate_model == expected_model)
-        if (overlap, model_match) > (best_overlap, best_model_match):
-            best_path = candidate
-            best_overlap = overlap
-            best_model_match = model_match
-
-    if best_overlap > 0:
-        source = "auto_discovered_by_filename_overlap"
-        if best_model_match:
-            source = "auto_discovered_by_filename_and_model_match"
-        return best_path, source, best_overlap
-    return preferred, "missing", 0
-
-
 def require_complete_grouped_inputs(data_map: dict[str, dict[str, Any]]) -> None:
     missing = [
         f"{key}: {item['path']} (exists={item['exists']}, json_files={item['file_count']})"
@@ -236,15 +221,17 @@ def require_complete_grouped_inputs(data_map: dict[str, dict[str, Any]]) -> None
         "Grouped BERTScore needs all four data sources (a/b/c/d) to score every group.\n"
         "Missing or empty sources:\n"
         f"{detail}\n\n"
-        "Fix by running `python scripts/translate.py --run-dir <run-dir> --model <model>` "
-        "or pass explicit paths with `--reference-translation-dir` and "
-        "`--candidate-translation-dir`. Use `--allow-partial` only if you intentionally "
-        "want an incomplete report."
+        "Fix by passing explicit A/B/C/D directories. This script intentionally does "
+        "not auto-search other run folders because that can mix unrelated experiments."
     )
 
 
 def mean(values: list[float]) -> float:
     return sum(values) / len(values) if values else 0.0
+
+
+def normalize_cosine_score(value: float) -> float:
+    return min(1.0, max(0.0, (value + 1.0) / 2.0))
 
 
 def load_bert_score():
@@ -297,14 +284,29 @@ def summarize_by_category(rows: list[dict[str, Any]]) -> dict[str, dict[str, Any
             "bertscore_precision": mean([item["bertscore_precision"] for item in items]),
             "bertscore_recall": mean([item["bertscore_recall"] for item in items]),
             "bertscore_f1": mean([item["bertscore_f1"] for item in items]),
+            "raw_bertscore_precision": mean([item["raw_bertscore_precision"] for item in items]),
+            "raw_bertscore_recall": mean([item["raw_bertscore_recall"] for item in items]),
+            "raw_bertscore_f1": mean([item["raw_bertscore_f1"] for item in items]),
         }
         for category, items in sorted(grouped.items())
     }
 
 
-def score_comparison(
+def calibration_flag(delta_f1: float | None) -> str:
+    if delta_f1 is None:
+        return "not_available"
+    abs_delta = abs(delta_f1)
+    if abs_delta >= 0.10:
+        return "strong"
+    if abs_delta >= 0.05:
+        return "noticeable"
+    return "none"
+
+
+def score_scope(
     comparison_id: str,
     comparison: dict[str, str],
+    scope: str,
     data: dict[str, dict[str, dict[str, Any]]],
     args: argparse.Namespace,
 ) -> dict[str, Any]:
@@ -317,11 +319,8 @@ def score_comparison(
         common = common[: args.limit]
     unmatched = sorted(set(reference_bundles) ^ set(candidate_bundles))
     result: dict[str, Any] = {
-        "name": comparison["name"],
-        "group": comparison["group"],
-        "meaning": comparison["meaning"],
-        "reference_key": reference_key,
-        "candidate_key": candidate_key,
+        "comparison": comparison_id,
+        "scope": scope,
         "matched_image_count": len(common),
         "unmatched_image_count": len(unmatched),
         "unmatched_images": unmatched,
@@ -335,8 +334,8 @@ def score_comparison(
         result["status"] = "skipped_no_matched_images"
         return result
 
-    candidates = [caption_text(candidate_bundles[key]) for key in common]
-    references = [caption_text(reference_bundles[key]) for key in common]
+    candidates = [text_for_scope(candidate_bundles[key], scope) for key in common]
+    references = [text_for_scope(reference_bundles[key], scope) for key in common]
     valid_indexes = [
         index for index, (candidate, reference) in enumerate(zip(candidates, references)) if candidate and reference
     ]
@@ -346,7 +345,10 @@ def score_comparison(
 
     valid_candidates = [candidates[index] for index in valid_indexes]
     valid_references = [references[index] for index in valid_indexes]
-    precision, recall, f1 = compute_bert_scores(valid_candidates, valid_references, args)
+    raw_precision, raw_recall, raw_f1 = compute_bert_scores(valid_candidates, valid_references, args)
+    precision = [normalize_cosine_score(value) for value in raw_precision]
+    recall = [normalize_cosine_score(value) for value in raw_recall]
+    f1 = [normalize_cosine_score(value) for value in raw_f1]
 
     rows: list[dict[str, Any]] = []
     for output_index, source_index in enumerate(valid_indexes):
@@ -356,9 +358,16 @@ def score_comparison(
         row = {
             "image": key,
             "category": category_for(candidate_bundle, key) or category_for(reference_bundle, key),
+            "comparison": comparison_id,
+            "scope": scope,
+            "reference_key": reference_key,
+            "candidate_key": candidate_key,
             "bertscore_precision": precision[output_index],
             "bertscore_recall": recall[output_index],
             "bertscore_f1": f1[output_index],
+            "raw_bertscore_precision": raw_precision[output_index],
+            "raw_bertscore_recall": raw_recall[output_index],
+            "raw_bertscore_f1": raw_f1[output_index],
             "candidate_text": valid_candidates[output_index],
             "reference_text": valid_references[output_index],
         }
@@ -372,10 +381,71 @@ def score_comparison(
             "bertscore_precision": mean([row["bertscore_precision"] for row in rows]),
             "bertscore_recall": mean([row["bertscore_recall"] for row in rows]),
             "bertscore_f1": mean([row["bertscore_f1"] for row in rows]),
+            "raw_bertscore_precision": mean([row["raw_bertscore_precision"] for row in rows]),
+            "raw_bertscore_recall": mean([row["raw_bertscore_recall"] for row in rows]),
+            "raw_bertscore_f1": mean([row["raw_bertscore_f1"] for row in rows]),
             "by_category": summarize_by_category(rows),
             "by_image": rows,
         }
     )
+    return result
+
+
+def score_comparison(
+    comparison_id: str,
+    comparison: dict[str, str],
+    data: dict[str, dict[str, dict[str, Any]]],
+    args: argparse.Namespace,
+) -> dict[str, Any]:
+    result: dict[str, Any] = {
+        "name": comparison["name"],
+        "group": comparison["group"],
+        "meaning": comparison["meaning"],
+        "reference_key": comparison["reference_key"],
+        "candidate_key": comparison["candidate_key"],
+        "scopes": {},
+        "by_image_evidence": [],
+    }
+
+    for scope in args.selected_scopes:
+        result["scopes"][scope] = score_scope(comparison_id, comparison, scope, data, args)
+
+    visual_rows = {
+        row["image"]: row
+        for row in result["scopes"].get("visual_summary_only", {}).get("by_image", [])
+    }
+    full_rows = {
+        row["image"]: row
+        for row in result["scopes"].get("full_caption_fields", {}).get("by_image", [])
+    }
+    evidence_rows = []
+    for image in sorted(set(visual_rows) | set(full_rows)):
+        visual = visual_rows.get(image)
+        full = full_rows.get(image)
+        delta = None
+        if visual and full:
+            delta = full["bertscore_f1"] - visual["bertscore_f1"]
+        for row in [visual, full]:
+            if not row:
+                continue
+            evidence = dict(row)
+            evidence["delta_f1"] = delta
+            evidence["calibration_flag"] = calibration_flag(delta)
+            evidence_rows.append(evidence)
+    result["by_image_evidence"] = evidence_rows
+
+    primary_scope = args.selected_scopes[0]
+    primary_summary = result["scopes"][primary_scope]
+    result["primary_scope"] = primary_scope
+    result["status"] = primary_summary.get("status", "unknown")
+    result["matched_image_count"] = primary_summary.get("matched_image_count", 0)
+    result["scored_image_count"] = primary_summary.get("scored_image_count", 0)
+    result["bertscore_precision"] = primary_summary.get("bertscore_precision", 0.0)
+    result["bertscore_recall"] = primary_summary.get("bertscore_recall", 0.0)
+    result["bertscore_f1"] = primary_summary.get("bertscore_f1", 0.0)
+    result["raw_bertscore_precision"] = primary_summary.get("raw_bertscore_precision", 0.0)
+    result["raw_bertscore_recall"] = primary_summary.get("raw_bertscore_recall", 0.0)
+    result["raw_bertscore_f1"] = primary_summary.get("raw_bertscore_f1", 0.0)
     return result
 
 
@@ -393,11 +463,46 @@ def fmt(value: Any) -> str:
     return f"{value:.4f}" if isinstance(value, float) else str(value)
 
 
+def safe_id(value: str) -> str:
+    safe = re.sub(r"[^A-Za-z0-9_.-]+", "_", value.strip())
+    return safe.strip("_") or "unknown"
+
+
+def path_label(path: Path) -> str:
+    parts = path.parts
+    if "runs" in parts:
+        index = parts.index("runs")
+        return "_".join(parts[index + 1 :])
+    return path.name
+
+
+def default_report_id(args: argparse.Namespace) -> str:
+    candidate_label = path_label(Path(args.candidate_dir))
+    reference_label = path_label(Path(args.reference_dir))
+    model_label = safe_id(args.model_type.replace("/", "_"))
+    return safe_id(
+        f"{Path(args.run_dir).name}_{args.provider}_{args.mode}_"
+        f"A-{reference_label}_C-{candidate_label}_{model_label}"
+    )
+
+
+def output_paths(args: argparse.Namespace) -> tuple[Path, Path]:
+    output_dir = Path(args.output_dir)
+    timestamp = datetime.now().strftime("%Y%m%dT%H%M%S")
+    report_id = safe_id(args.report_id) if args.report_id else default_report_id(args)
+    stem = f"{report_id}_{timestamp}"
+    return output_dir / f"{stem}.json", output_dir / f"{stem}.md"
+
+
 def write_markdown(path: Path, report: dict[str, Any]) -> None:
     lines: list[str] = [
-        "# Grouped Semantic Comparison BERTScore",
+        "# BERTScore Evidence Report",
         "",
         "## 1. Run / Data Source",
+        "",
+        f"- Candidate run: `{report['run_dir']}`",
+        f"- Main comparisons: `{', '.join(report['main_comparisons'])}`",
+        f"- Diagnostic comparisons included: `{report['include_diagnostic']}`",
         "",
     ]
     data_rows = []
@@ -408,13 +513,12 @@ def write_markdown(path: Path, report: dict[str, Any]) -> None:
                 item["path"],
                 item["exists"],
                 item["file_count"],
-                item["source"],
                 item["filename_overlap_with_source"],
             ]
         )
     lines.extend(
         markdown_table(
-            ["ID", "Path", "Exists", "JSON files", "Source", "Filename overlap"],
+            ["ID", "Path", "Exists", "JSON files", "Filename overlap"],
             data_rows,
         )
     )
@@ -441,68 +545,92 @@ def write_markdown(path: Path, report: dict[str, Any]) -> None:
     )
     summary_rows = []
     for comparison_id, item in report["summary"].items():
-        summary_rows.append(
-            [
-                comparison_id,
-                item["group"],
-                item["name"],
-                item["status"],
-                item["matched_image_count"],
-                item.get("scored_image_count", 0),
-                fmt(item["bertscore_precision"]),
-                fmt(item["bertscore_recall"]),
-                fmt(item["bertscore_f1"]),
-            ]
-        )
+        for scope, scope_item in item.get("scopes", {}).items():
+            summary_rows.append(
+                [
+                    comparison_id,
+                    item["group"],
+                    scope,
+                    scope_item["status"],
+                    scope_item["matched_image_count"],
+                    scope_item.get("scored_image_count", 0),
+                    fmt(scope_item["bertscore_precision"]),
+                    fmt(scope_item["bertscore_recall"]),
+                    fmt(scope_item["bertscore_f1"]),
+                ]
+            )
     lines.extend(
         markdown_table(
-            ["Comparison", "Group", "Name", "Status", "Matched", "Scored", "P", "R", "F1"],
+            ["Comparison", "Group", "Scope", "Status", "Matched", "Scored", "P", "R", "F1"],
             summary_rows,
         )
     )
     lines.extend(["", "## 4. Category Table", ""])
     for comparison_id, item in report["summary"].items():
         lines.extend([f"### {comparison_id} - {item['name']}", ""])
-        category_rows = [
-            [
-                category,
-                values["matched_image_count"],
-                fmt(values["bertscore_precision"]),
-                fmt(values["bertscore_recall"]),
-                fmt(values["bertscore_f1"]),
+        for scope, scope_item in item.get("scopes", {}).items():
+            lines.extend([f"#### {scope}", ""])
+            category_rows = [
+                [
+                    category,
+                    values["matched_image_count"],
+                    fmt(values["bertscore_precision"]),
+                    fmt(values["bertscore_recall"]),
+                    fmt(values["bertscore_f1"]),
+                ]
+                for category, values in scope_item.get("by_category", {}).items()
             ]
-            for category, values in item.get("by_category", {}).items()
-        ]
-        if category_rows:
-            lines.extend(markdown_table(["Category", "Count", "P", "R", "F1"], category_rows))
-        else:
-            lines.append("No scored category rows.")
+            if category_rows:
+                lines.extend(markdown_table(["Category", "Count", "P", "R", "F1"], category_rows))
+            else:
+                lines.append("No scored category rows.")
+            lines.append("")
         lines.append("")
 
     lines.extend(
         [
-            "## 5. Lowest / Highest Examples",
+            "## 5. Per-Image Evidence",
             "",
         ]
     )
     for comparison_id, item in report["summary"].items():
-        images = sorted(item.get("by_image", []), key=lambda row: row["bertscore_f1"])
         lines.extend([f"### {comparison_id} - {item['name']}", ""])
-        example_rows = []
-        for row in images[:3] + images[-3:]:
-            example_rows.append(
+        evidence = sorted(
+            item.get("by_image_evidence", []),
+            key=lambda row: (row["image"], row["scope"]),
+        )
+        if not evidence:
+            lines.append("No scored evidence rows.")
+            lines.append("")
+            continue
+        current_image = None
+        for row in evidence:
+            if row["image"] != current_image:
+                current_image = row["image"]
+                lines.extend([f"#### {current_image}", "", f"- Category: `{row['category']}`", ""])
+            lines.extend(
                 [
-                    row["image"],
-                    row["category"],
-                    fmt(row["bertscore_precision"]),
-                    fmt(row["bertscore_recall"]),
-                    fmt(row["bertscore_f1"]),
+                    f"**{row['scope']}**",
+                    "",
+                    f"- Normalized P/R/F1: `{fmt(row['bertscore_precision'])}` / `{fmt(row['bertscore_recall'])}` / `{fmt(row['bertscore_f1'])}`",
+                    f"- Raw P/R/F1: `{fmt(row['raw_bertscore_precision'])}` / `{fmt(row['raw_bertscore_recall'])}` / `{fmt(row['raw_bertscore_f1'])}`",
+                    f"- Delta F1 full-minus-visual: `{fmt(row['delta_f1'])}`",
+                    f"- Calibration flag: `{row['calibration_flag']}`",
+                    "",
+                    "Reference text:",
+                    "",
+                    "```text",
+                    row["reference_text"],
+                    "```",
+                    "",
+                    "Candidate text:",
+                    "",
+                    "```text",
+                    row["candidate_text"],
+                    "```",
+                    "",
                 ]
             )
-        if example_rows:
-            lines.extend(markdown_table(["Image", "Category", "P", "R", "F1"], example_rows))
-        else:
-            lines.append("No scored examples.")
         lines.append("")
 
     lines.extend(
@@ -510,75 +638,44 @@ def write_markdown(path: Path, report: dict[str, Any]) -> None:
             "## 6. Interpretation Notes",
             "",
             "- BERTScore is semantic similarity, not medical correctness.",
-            "- Caption quality, translation faithfulness, and human-review calibration are separate comparison groups with equal report priority.",
+            "- Main P/R/F1 values are normalized with `(raw + 1) / 2` and clipped to `[0, 1]`.",
+            "- Raw BERTScore values are preserved in JSON and shown in per-image Markdown evidence.",
+            "- `AC` and `BD` are the main comparison groups for 620.",
+            "- `visual_summary_only` checks the free visual description only.",
+            "- `full_caption_fields` includes visual summary plus structured wound fields.",
+            "- `--scopes` controls which scope is computed. Use one scope per command when you want independent reports.",
+            "- `delta_f1 = full_caption_fields_f1 - visual_summary_only_f1` is available only when both scopes are included in the same report.",
             "- Mixed Chinese-English translation text is expected when English medical terms are intentionally preserved.",
-            "- Do not compress the five comparison groups into one final score.",
+            "- Do not compress AC and BD into one final score.",
             "",
         ]
     )
+    path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text("\n".join(lines), encoding="utf-8")
 
 
 def build_report(args: argparse.Namespace) -> dict[str, Any]:
     run_dir = Path(args.run_dir)
-    runs_root = runs_root_for(run_dir)
-    translation_root = Path(args.translation_root) if args.translation_root else run_dir / "output_translation"
     reference_dir = Path(args.reference_dir)
-    candidate_dir = (
-        Path(args.candidate_dir)
-        if args.candidate_dir
-        else run_dir / "outputs" / args.provider / args.mode
-    )
-    preferred_reference_translation_dir = (
-        Path(args.reference_translation_dir)
-        if args.reference_translation_dir
-        else translation_root / "saas" / args.mode
-    )
-    preferred_candidate_translation_dir = (
-        Path(args.candidate_translation_dir)
-        if args.candidate_translation_dir
-        else translation_root / args.provider / args.mode
-    )
-    reference_translation_dir, reference_translation_source, reference_translation_overlap = (
-        resolve_translation_dir(
-            preferred_reference_translation_dir,
-            reference_dir,
-            runs_root,
-            "saas",
-            args.mode,
-            first_model_in_dir(reference_dir),
-        )
-    )
-    candidate_translation_dir, candidate_translation_source, candidate_translation_overlap = (
-        resolve_translation_dir(
-            preferred_candidate_translation_dir,
-            candidate_dir,
-            runs_root,
-            args.provider,
-            args.mode,
-            first_model_in_dir(candidate_dir),
-        )
-    )
+    reference_translation_dir = Path(args.reference_translation_dir)
+    candidate_dir = Path(args.candidate_dir)
+    candidate_translation_dir = Path(args.candidate_translation_dir)
     data_sources = {
         "a_reference_english": {
             "path": reference_dir,
-            "source": "provided",
             "filename_overlap_with_source": len(json_stems(reference_dir)),
         },
         "b_translated_reference": {
             "path": reference_translation_dir,
-            "source": reference_translation_source,
-            "filename_overlap_with_source": reference_translation_overlap,
+            "filename_overlap_with_source": len(json_stems(reference_dir) & json_stems(reference_translation_dir)),
         },
         "c_candidate_english": {
             "path": candidate_dir,
-            "source": "provided",
             "filename_overlap_with_source": len(json_stems(candidate_dir)),
         },
         "d_translated_candidate": {
             "path": candidate_translation_dir,
-            "source": candidate_translation_source,
-            "filename_overlap_with_source": candidate_translation_overlap,
+            "filename_overlap_with_source": len(json_stems(candidate_dir) & json_stems(candidate_translation_dir)),
         },
     }
     data_paths = {key: value["path"] for key, value in data_sources.items()}
@@ -588,13 +685,11 @@ def build_report(args: argparse.Namespace) -> dict[str, Any]:
             "path": str(path),
             "exists": path.exists(),
             "file_count": len(data[key]),
-            "source": data_sources[key]["source"],
             "filename_overlap_with_source": data_sources[key]["filename_overlap_with_source"],
         }
         for key, path in data_paths.items()
     }
-    if not args.allow_partial:
-        require_complete_grouped_inputs(data_map)
+    require_complete_grouped_inputs(data_map)
     settings = {
         "lang": args.lang,
         "model_type": args.model_type,
@@ -605,13 +700,21 @@ def build_report(args: argparse.Namespace) -> dict[str, Any]:
         "batch_size": args.batch_size,
         "use_fast_tokenizer": args.use_fast_tokenizer,
         "mixed_language_expected": True,
+        "score_normalization": "cosine_to_0_1",
+        "score_normalization_formula": "normalized = clamp((raw + 1) / 2, 0, 1)",
+        "score_normalization_note": "Main bertscore_* fields are normalized; raw_bertscore_* fields preserve the BERTScore library output.",
         "hash_code": None,
         "hash_code_note": "Not available from this wrapper; preserve all settings for reproducibility.",
         "caption_fields": CAPTION_FIELDS,
+        "available_scopes": SCOPES,
+        "selected_scopes": args.selected_scopes,
     }
+    comparisons = dict(COMPARISONS)
+    if args.include_diagnostic:
+        comparisons.update(DIAGNOSTIC_COMPARISONS)
     summary = {
         comparison_id: score_comparison(comparison_id, comparison, data, args)
-        for comparison_id, comparison in COMPARISONS.items()
+        for comparison_id, comparison in comparisons.items()
     }
     return {
         "created_at": now_iso(),
@@ -624,10 +727,11 @@ def build_report(args: argparse.Namespace) -> dict[str, Any]:
         "limit": args.limit,
         "data_map": data_map,
         "comparison_groups": {
-            "caption_quality": ["a_vs_c"],
-            "translation_faithfulness": ["a_vs_b", "c_vs_d"],
-            "human_review_calibration": ["a_vs_d", "b_vs_d"],
+            "main": list(COMPARISONS),
+            "diagnostic": list(DIAGNOSTIC_COMPARISONS),
         },
+        "main_comparisons": list(COMPARISONS),
+        "include_diagnostic": args.include_diagnostic,
         "settings": settings,
         "summary": summary,
     }
@@ -635,10 +739,8 @@ def build_report(args: argparse.Namespace) -> dict[str, Any]:
 
 def main() -> None:
     args = parse_args()
-    run_dir = Path(args.run_dir)
     report = build_report(args)
-    output_json = run_dir / "bertscore_comparisons.json"
-    output_md = run_dir / "bertscore_comparisons.md"
+    output_json, output_md = output_paths(args)
     write_json(output_json, report)
     write_markdown(output_md, report)
     print(f"Saved {output_json}")
