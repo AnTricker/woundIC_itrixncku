@@ -345,7 +345,45 @@ Common parameters:
 | `--use-fast-tokenizer` | Use fast tokenizer |
 | `--limit` | Optional small dry-run limit |
 
-## 8. Build VQA Dataset
+## 8. Field-Level English BERTScore Database
+
+Purpose:
+
+- Compares one English reference caption folder with one English candidate folder.
+- Scores matching schema fields independently; it never concatenates different fields.
+- Writes one JSON score database for the selected candidate and does not aggregate scores or create charts.
+- Preserves the legacy grouped scorer described above.
+
+Command:
+
+```bash
+python scripts/bertscore_field_scores.py runs/saas_simple_baseline runs/20260525_gemma4_26b/outputs/local/simple
+```
+
+Default output:
+
+```text
+runs/bertscore_field_scores/ref_saas_simple_baseline__can_20260525_gemma4_26b_caption_field_scores.json
+```
+
+The output contains one filename-keyed block per matched caption. Text fields store
+official English baseline-rescaled BERTScore P/R/F1; observation states, categorical
+fields, empty arrays, unresolved values, and schema anomalies remain separate evidence.
+Semantic array fields store every ref-item/can-item pair plus the best score for each
+ref and can item.
+
+Optional parameters:
+
+| Argument | Meaning |
+|---|---|
+| `--output-dir` | Output folder; default `runs/bertscore_field_scores` |
+| `--idf` | Enable IDF weighting |
+| `--batch-size` | BERTScore batch size |
+| `--device` | Explicit device such as `cpu` or `cuda` |
+| `--use-fast-tokenizer` | Use the upstream fast tokenizer |
+| `--limit` | Score only the first N matched filenames for smoke testing |
+
+## 9. Build VQA Dataset
 
 Purpose:
 
@@ -377,7 +415,7 @@ Meaning:
 - Evidence comes from `caption.image_observation.visual_summary`.
 - It is not yet a formal benchmark.
 
-## 9. Analyze Schema Fields
+## 10. Analyze Schema Fields
 
 Purpose:
 
@@ -406,7 +444,7 @@ Meaning:
 - `possible fixed field; inspect` means the field may be too template-like.
 - This script does not change prompt/schema by itself.
 
-## 10. Generate Charts
+## 11. Generate Charts
 
 Purpose:
 
@@ -427,7 +465,7 @@ Outputs:
 runs/20260525_gemma4_26b/charts/*.png
 ```
 
-## 11. Optional Run-All
+## 12. Optional Run-All
 
 Purpose:
 
@@ -455,7 +493,7 @@ python scripts/run_all.py \
   --saas-simple-baseline-dir runs/saas_simple_baseline
 ```
 
-## 12. Metadata Report
+## 13. Metadata Report
 
 Purpose:
 
@@ -476,7 +514,7 @@ Outputs:
 runs/20260525_gemma4_26b/20260525_gemma4_26b_record_summary.md
 ```
 
-## 13. Caption Translation
+## 14. Caption Translation
 
 Purpose:
 
@@ -513,7 +551,7 @@ Meaning:
 - Translation is for human review and grouped BERTScore comparison only.
 - Translation must not be used for the lexical `scores.json` / `scores.md` calculation.
 
-## 14. Visual Summary Translation Comparison
+## 15. Visual Summary Translation Comparison
 
 Purpose:
 
@@ -541,7 +579,7 @@ Meaning:
 - It does not modify original outputs.
 - It does not participate in scoring.
 
-## 15. Chart Fix
+## 16. Chart Fix
 
 Purpose:
 
@@ -562,7 +600,7 @@ runs/20260525_gemma4_26b/charts/*.png
 runs/20260525_gemma4_26b/charts/_backup_before_523_fix/*.png
 ```
 
-## 16. Score Calculation Guide
+## 17. Score Calculation Guide
 
 Purpose:
 
@@ -581,7 +619,7 @@ Meaning:
 - Use this document when interpreting `scores.json` and `scores.md`.
 - It explains what the scores can and cannot prove.
 
-## 17. Validation
+## 18. Validation
 
 Static validation:
 
@@ -611,7 +649,7 @@ Legacy pipeline command list:
 python -m pipeline --help
 ```
 
-## 18. Update Record
+## 19. Update Record
 
 | Date | Command / Script | Change |
 |---|---|---|
@@ -630,3 +668,4 @@ python -m pipeline --help
 | 2026-06-21 | `scripts/bertscore_rescore.py` | Removed cross-run translation auto-discovery; A/B/C/D source folders must be explicit; output now goes to independent `runs/bertscore_reports/`; added visual-summary/full-field evidence and delta flags. |
 | 2026-06-21 | `scripts/build_vqa_dataset.py` | Added deterministic visual-summary MCQ dataset generator. |
 | 2026-06-21 | `scripts/analyze_schema_fields.py` | Added schema field reduction analysis report. |
+| 2026-08-15 | `scripts/bertscore_field_scores.py` | Added filename-blocked, schema-grouped English ref/can field-level BERTScore databases with observation-state and anomaly evidence. |
