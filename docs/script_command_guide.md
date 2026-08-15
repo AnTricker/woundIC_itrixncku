@@ -32,17 +32,19 @@ runs/20260525_gemma4_26b
 | 5 | `scripts/generate_saas.py` | Generate Gemini/SaaS outputs |
 | 6 | `scripts/score.py` | Score local outputs against standard SaaS simple baseline |
 | 7 | `scripts/bertscore_rescore.py` | Compute grouped BERTScore semantic comparisons |
-| 8 | `scripts/build_vqa_dataset.py` | Build deterministic visual-summary MCQ dataset |
-| 9 | `scripts/analyze_schema_fields.py` | Analyze schema fields for reduction planning |
-| 10 | `scripts/charts.py` | Generate run-local charts |
-| 11 | `scripts/run_all.py` | Optional one-command pipeline run |
-| 12 | `scripts/metadata.py` | Build run-local metadata report |
-| 13 | `scripts/translate.py` | Translate all output captions with local Ollama model |
-| 14 | `scripts/compare_visual_summary_translations.py` | Compare translated visual summaries across 510 local, 523 local, and SaaS simple |
-| 15 | `scripts/fix_charts.py` | Rewrite chart PNGs with clearer labels |
-| 16 | `docs/score_calculation_guide.md` | Explain current BLEU-4, ROUGE-L, METEOR-lite, CIDEr-lite, and BERTScore calculations |
-| 17 | Validation | Static command checks |
-| 18 | Update Record | Record when scripts are added or changed |
+| 8 | `scripts/bertscore_field_scores.py` | Build a field-level BERTScore score database |
+| 9 | `scripts/bertscore_statistics.py` | Generate field-level statistics charts and Markdown report |
+| 10 | `scripts/build_vqa_dataset.py` | Build deterministic visual-summary MCQ dataset |
+| 11 | `scripts/analyze_schema_fields.py` | Analyze schema fields for reduction planning |
+| 12 | `scripts/charts.py` | Generate run-local charts |
+| 13 | `scripts/run_all.py` | Optional one-command pipeline run |
+| 14 | `scripts/metadata.py` | Build run-local metadata report |
+| 15 | `scripts/translate.py` | Translate all output captions with local Ollama model |
+| 16 | `scripts/compare_visual_summary_translations.py` | Compare translated visual summaries across 510 local, 523 local, and SaaS simple |
+| 17 | `scripts/fix_charts.py` | Rewrite chart PNGs with clearer labels |
+| 18 | `docs/score_calculation_guide.md` | Explain current BLEU-4, ROUGE-L, METEOR-lite, CIDEr-lite, and BERTScore calculations |
+| 19 | Validation | Static command checks |
+| 20 | Update Record | Record when scripts are added or changed |
 
 ## 1. Standard Form
 
@@ -383,7 +385,39 @@ Optional parameters:
 | `--use-fast-tokenizer` | Use the upstream fast tokenizer |
 | `--limit` | Score only the first N matched filenames for smoke testing |
 
-## 9. Build VQA Dataset
+## 9. Field-Level BERTScore Statistics Report
+
+Purpose:
+
+- Reads one `caption_field_scores.v1` JSON without recalculating BERTScore.
+- Produces per-wound semantic-quality and coverage charts plus schema-compliance tables.
+- Uses each image as one observation; array item scores are averaged within an image before aggregation.
+
+Command:
+
+```bash
+python scripts/bertscore_statistics.py runs/bertscore_field_scores/ref_saas_simple_baseline__can_20260525_gemma4_26b_caption_field_scores.json
+```
+
+Default output:
+
+```text
+runs/bertscore_statistics/ref_saas_simple_baseline__can_20260525_gemma4_26b_statistics.md
+runs/bertscore_statistics/ref_saas_simple_baseline__can_20260525_gemma4_26b_statistics_assets/
+```
+
+The Markdown report embeds the PNG assets using relative paths. Its BERTScore charts
+retain the official baseline-rescaled values, including possible negative values, and
+use 0 as the visible baseline. Schema compliance evaluates candidate anomalies while
+listing reference-side anomalies separately as quality warnings.
+
+Optional parameter:
+
+| Argument | Meaning |
+|---|---|
+| `--output-dir` | Output folder; default `runs/bertscore_statistics` |
+
+## 10. Build VQA Dataset
 
 Purpose:
 
@@ -415,7 +449,7 @@ Meaning:
 - Evidence comes from `caption.image_observation.visual_summary`.
 - It is not yet a formal benchmark.
 
-## 10. Analyze Schema Fields
+## 11. Analyze Schema Fields
 
 Purpose:
 
@@ -444,7 +478,7 @@ Meaning:
 - `possible fixed field; inspect` means the field may be too template-like.
 - This script does not change prompt/schema by itself.
 
-## 11. Generate Charts
+## 12. Generate Charts
 
 Purpose:
 
@@ -465,7 +499,7 @@ Outputs:
 runs/20260525_gemma4_26b/charts/*.png
 ```
 
-## 12. Optional Run-All
+## 13. Optional Run-All
 
 Purpose:
 
@@ -493,7 +527,7 @@ python scripts/run_all.py \
   --saas-simple-baseline-dir runs/saas_simple_baseline
 ```
 
-## 13. Metadata Report
+## 14. Metadata Report
 
 Purpose:
 
@@ -514,7 +548,7 @@ Outputs:
 runs/20260525_gemma4_26b/20260525_gemma4_26b_record_summary.md
 ```
 
-## 14. Caption Translation
+## 15. Caption Translation
 
 Purpose:
 
@@ -551,7 +585,7 @@ Meaning:
 - Translation is for human review and grouped BERTScore comparison only.
 - Translation must not be used for the lexical `scores.json` / `scores.md` calculation.
 
-## 15. Visual Summary Translation Comparison
+## 16. Visual Summary Translation Comparison
 
 Purpose:
 
@@ -579,7 +613,7 @@ Meaning:
 - It does not modify original outputs.
 - It does not participate in scoring.
 
-## 16. Chart Fix
+## 17. Chart Fix
 
 Purpose:
 
@@ -600,7 +634,7 @@ runs/20260525_gemma4_26b/charts/*.png
 runs/20260525_gemma4_26b/charts/_backup_before_523_fix/*.png
 ```
 
-## 17. Score Calculation Guide
+## 18. Score Calculation Guide
 
 Purpose:
 
@@ -619,7 +653,7 @@ Meaning:
 - Use this document when interpreting `scores.json` and `scores.md`.
 - It explains what the scores can and cannot prove.
 
-## 18. Validation
+## 19. Validation
 
 Static validation:
 
@@ -649,7 +683,7 @@ Legacy pipeline command list:
 python -m pipeline --help
 ```
 
-## 19. Update Record
+## 20. Update Record
 
 | Date | Command / Script | Change |
 |---|---|---|
@@ -669,3 +703,4 @@ python -m pipeline --help
 | 2026-06-21 | `scripts/build_vqa_dataset.py` | Added deterministic visual-summary MCQ dataset generator. |
 | 2026-06-21 | `scripts/analyze_schema_fields.py` | Added schema field reduction analysis report. |
 | 2026-08-15 | `scripts/bertscore_field_scores.py` | Added filename-blocked, schema-grouped English ref/can field-level BERTScore databases with observation-state and anomaly evidence. |
+| 2026-08-15 | `scripts/bertscore_statistics.py` | Added per-image field-level BERTScore, coverage, categorical, and schema-compliance Markdown reporting with per-wound PNG charts. |
