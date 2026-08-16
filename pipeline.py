@@ -167,17 +167,50 @@ def load_split_summary(run_dir: Path) -> dict[str, Any]:
     return read_optional_json(run_dir / "split_summary.json")
 
 
-def saas_limits_for_model(model: str) -> dict[str, int | str]:
+def saas_limits_for_model(
+    model: str,
+    *,
+    rpm: int | None = None,
+    rpd: int | None = None,
+    tpm: int | None = None,
+) -> dict[str, int | str]:
     normalized = model.lower()
     for key, limits in DEFAULT_SAAS_LIMITS.items():
         if key in normalized:
-            return {"model": key, **limits}
-    return {
-        "model": model,
-        "rpm": 0,
-        "rpd": 0,
-        "tpm": 0,
-    }
+            result: dict[str, int | str] = {
+                "model": key,
+                **limits,
+                "source": "project planning default",
+            }
+            break
+    else:
+        result = {
+            "model": model,
+            "rpm": 0,
+            "rpd": 0,
+            "tpm": 0,
+            "source": "unknown; configure from Google AI Studio",
+        }
+
+    overrides = {"rpm": rpm, "rpd": rpd, "tpm": tpm}
+    if any(value is not None for value in overrides.values()):
+        for name, value in overrides.items():
+            if value is not None:
+                if value < 0:
+                    raise ValueError(f"--saas-{name} must be >= 0")
+                result[name] = value
+        result["source"] = "CLI override from project quota"
+    return result
+
+
+def parse_modes(value: str) -> tuple[str, ...]:
+    modes = tuple(dict.fromkeys(part.strip() for part in value.split(",") if part.strip()))
+    if not modes:
+        raise ValueError("At least one mode is required")
+    invalid = set(modes) - set(MODES)
+    if invalid:
+        raise ValueError(f"Invalid mode(s): {', '.join(sorted(invalid))}")
+    return modes
 
 
 def update_token_stats(stats: dict[str, Any] | None, usage: dict[str, Any]) -> None:
@@ -1090,10 +1123,7 @@ def generate_outputs(args: argparse.Namespace) -> None:
     run_dir = Path(args.run_dir)
     rows = read_manifest(run_dir)
     scopes = scope_arg(args.scopes)
-    modes = tuple(args.modes.split(","))
-    for mode in modes:
-        if mode not in MODES:
-            raise ValueError(f"Invalid mode: {mode}")
+    modes = parse_modes(args.modes)
 
     provider = args.provider
     if provider == "local":
@@ -1216,8 +1246,11 @@ def estimate_gemini_consumption(
     probe_results: dict[str, dict[str, Any]],
     selected_count: int,
     model: str,
+    rpm: int | None = None,
+    rpd: int | None = None,
+    tpm: int | None = None,
 ) -> dict[str, Any]:
-    limits = saas_limits_for_model(model)
+    limits = saas_limits_for_model(model, rpm=rpm, rpd=rpd, tpm=tpm)
     rpm = int(limits.get("rpm", 0) or 0)
     rpd = int(limits.get("rpd", 0) or 0)
     tpm = int(limits.get("tpm", 0) or 0)
@@ -1234,7 +1267,7 @@ def estimate_gemini_consumption(
             "total_token_count": "Gemini usageMetadata.totalTokenCount.",
         },
         "modes": {},
-        "combined_simple_full": {
+        "combined_selected_modes": {
             "estimated_request_count": 0,
             "estimated_quota_consuming_request_count": 0,
             "estimated_duration_sec": 0.0,
@@ -1296,7 +1329,7 @@ def estimate_gemini_consumption(
             "rpd_safe": True if not rpd else per_image_requests * selected_count <= rpd,
         }
         estimates["modes"][mode] = mode_estimate
-        combined = estimates["combined_simple_full"]
+        combined = estimates["combined_selected_modes"]
         combined["estimated_request_count"] += mode_estimate["estimated_request_count"]
         combined["estimated_quota_consuming_request_count"] += mode_estimate[
             "estimated_quota_consuming_request_count"
@@ -1314,7 +1347,7 @@ def estimate_gemini_consumption(
         combined["estimated_input_token_count"] += mode_estimate["estimated_input_token_count"]
         combined["estimated_output_token_count"] += mode_estimate["estimated_output_token_count"]
         combined["estimated_total_token_count"] += mode_estimate["estimated_total_token_count"]
-    combined = estimates["combined_simple_full"]
+    combined = estimates["combined_selected_modes"]
     combined_duration_for_tpm = max(
         combined["estimated_duration_sec"],
         combined["estimated_rpm_safe_min_duration_sec"],
@@ -1330,6 +1363,8 @@ def estimate_gemini_consumption(
         True if not rpd else combined["estimated_quota_consuming_request_count"] <= rpd
     )
     combined["tpm_safe"] = True if not tpm else combined["estimated_input_tpm"] <= tpm
+    if set(probe_results) == set(MODES):
+        estimates["combined_simple_full"] = dict(combined)
     return estimates
 
 
@@ -1340,12 +1375,13 @@ def run_gemini_probe(args: argparse.Namespace) -> None:
     if not scopes:
         raise ValueError("--scopes cannot be none for gemini-probe")
     selected = selected_rows(rows, scopes, args.limit)
+    modes = parse_modes(getattr(args, "modes", "simple,full"))
     probe_row = select_probe_row(rows, scopes, args.seed)
     probe_id = f"gemini_probe_{now_iso().replace(':', '').replace('-', '')}"
     probe_dir = run_dir / "probes" / probe_id
     probe_results: dict[str, dict[str, Any]] = {}
 
-    for mode in MODES:
+    for mode in modes:
         stats = empty_generation_stats("saas", args.saas_model, "gemini")
         started = time.monotonic()
         output_file = probe_dir / f"{mode}.json"
@@ -1438,16 +1474,22 @@ def run_gemini_probe(args: argparse.Namespace) -> None:
             "image": probe_row["image"],
             "image_name": probe_row["image_name"],
             "category": probe_row["category"],
+            "modes": list(modes),
         },
         "results": probe_results,
         "prediction": estimate_gemini_consumption(
             probe_results=probe_results,
             selected_count=len(selected),
             model=args.saas_model,
+            rpm=getattr(args, "saas_rpm", None),
+            rpd=getattr(args, "saas_rpd", None),
+            tpm=getattr(args, "saas_tpm", None),
         ),
         "notes": (
-            "Prediction is a rough projection from one image. Full prompt uses three "
-            "Gemini calls per image: caption, VQA, and self-check."
+            "Prediction is a rough projection from one image for the selected modes. "
+            "Simple uses one Gemini call per image; full uses three: caption, VQA, "
+            "and self-check. Model limits are planning defaults unless overridden "
+            "with the active Google AI Studio project quotas."
         ),
     }
     write_json(probe_dir / "gemini_probe_record.json", probe_record)
@@ -2307,12 +2349,16 @@ def parse_args() -> argparse.Namespace:
     probe_parser = subparsers.add_parser("gemini-probe")
     probe_parser.add_argument("--run-dir", required=True)
     probe_parser.add_argument("--scopes", default="smoke")
+    probe_parser.add_argument("--modes", default="simple")
     probe_parser.add_argument("--seed", type=int, default=42)
     probe_parser.add_argument("--limit", type=int, default=0)
     probe_parser.add_argument("--saas-model", default=DEFAULT_GEMINI_MODEL)
     probe_parser.add_argument("--saas-request-delay-sec", type=float, default=0.0)
     probe_parser.add_argument("--saas-max-retries", type=int, default=3)
     probe_parser.add_argument("--saas-backoff-base-sec", type=float, default=2.0)
+    probe_parser.add_argument("--saas-rpm", type=int, default=None)
+    probe_parser.add_argument("--saas-rpd", type=int, default=None)
+    probe_parser.add_argument("--saas-tpm", type=int, default=None)
     probe_parser.set_defaults(func=run_gemini_probe)
 
     generate_parser = subparsers.add_parser("generate")

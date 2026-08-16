@@ -138,7 +138,7 @@ runs/20260525_gemma4_26b/experiment_record.json
 Purpose:
 
 - Calls Gemini on one selected image.
-- Tests simple and full prompt once before larger SaaS generation.
+- Tests the selected prompt mode before larger SaaS generation; defaults to `simple`.
 - Estimates request/token/quota consumption.
 
 Command:
@@ -147,21 +147,46 @@ Command:
 python scripts/gemini_probe.py \
   --run-dir runs/20260525_gemma4_26b \
   --scopes smoke \
+  --modes simple \
   --seed 42 \
   --saas-model gemini-3.1-flash-lite \
-  --saas-request-delay-sec 4 \
+  --saas-request-delay-sec 5 \
   --saas-max-retries 5 \
-  --saas-backoff-base-sec 5
+  --saas-backoff-base-sec 5 \
+  --saas-rpm 15 \
+  --saas-rpd 500 \
+  --saas-tpm 250000
 ```
 
 Outputs:
 
 ```text
 runs/20260525_gemma4_26b/probes/<probe_id>/simple.json
-runs/20260525_gemma4_26b/probes/<probe_id>/full.json
 runs/20260525_gemma4_26b/probes/<probe_id>/gemini_probe_record.json
 runs/20260525_gemma4_26b/experiment_record.json
 ```
+
+`--modes` accepts `simple`, `full`, or `simple,full`. RPM/RPD/TPM values must be
+copied from the active project's Google AI Studio rate-limit page; the built-in
+values are conservative planning defaults, not account-specific quotas.
+
+Current planning defaults:
+
+| Model | RPM | RPD | Input TPM |
+|---|---:|---:|---:|
+| `gemini-2.5-flash` | 5 | 20 | 250,000 |
+| `gemini-3.1-flash-lite` | 15 | 500 | 250,000 |
+
+Quota behavior:
+
+- `--saas-request-delay-sec` controls actual pacing. At 15 RPM, use 5 seconds
+  rather than the exact 4-second boundary to retain some margin.
+- `--saas-rpm`, `--saas-rpd`, and `--saas-tpm` control probe projection and
+  safety flags; they do not change the provider-side quota.
+- TPM is estimated from Gemini `usageMetadata.promptTokenCount`; the pipeline
+  does not currently implement a token-bucket TPM limiter.
+- Rate limits are project/model/tier-specific. Confirm the active values in
+  [Google AI Studio](https://ai.google.dev/gemini-api/docs/rate-limits).
 
 ## 5. Generate SaaS Outputs
 
@@ -182,7 +207,7 @@ python scripts/generate_saas.py \
   --saas-provider gemini \
   --saas-model gemini-3.1-flash-lite \
   --workers 1 \
-  --saas-request-delay-sec 4 \
+  --saas-request-delay-sec 5 \
   --saas-max-retries 5 \
   --saas-backoff-base-sec 5
 ```
@@ -197,7 +222,7 @@ python scripts/generate_saas.py \
   --saas-provider gemini \
   --saas-model gemini-3.1-flash-lite \
   --workers 1 \
-  --saas-request-delay-sec 4 \
+  --saas-request-delay-sec 5 \
   --saas-max-retries 5 \
   --saas-backoff-base-sec 5
 ```
@@ -520,7 +545,7 @@ python scripts/run_all.py \
   --saas-provider gemini \
   --saas-model gemini-3.1-flash-lite \
   --workers 1 \
-  --saas-request-delay-sec 4 \
+  --saas-request-delay-sec 5 \
   --saas-max-retries 5 \
   --saas-backoff-base-sec 5 \
   --reference-mode simple \
@@ -540,6 +565,17 @@ Command:
 ```bash
 python scripts/metadata.py \
   --run-dir runs/20260525_gemma4_26b
+```
+
+The report can be generated immediately after generation/probe. If `scores.json`
+does not exist yet, score-related fields are reported as `not recorded`.
+
+Optional custom output path (must remain under `--run-dir`):
+
+```bash
+python scripts/metadata.py \
+  --run-dir runs/20260525_gemma4_26b \
+  --output runs/20260525_gemma4_26b/metadata_report.md
 ```
 
 Outputs:
@@ -704,3 +740,5 @@ python -m pipeline --help
 | 2026-06-21 | `scripts/analyze_schema_fields.py` | Added schema field reduction analysis report. |
 | 2026-08-15 | `scripts/bertscore_field_scores.py` | Added filename-blocked, schema-grouped English ref/can field-level BERTScore databases with observation-state and anomaly evidence. |
 | 2026-08-15 | `scripts/bertscore_statistics.py` | Added per-image field-level BERTScore, coverage, categorical, and schema-compliance Markdown reporting with per-wound PNG charts. |
+| 2026-08-16 | `pipeline.py`, `scripts/gemini_probe.py` | Added simple-only Gemini probe selection, project quota overrides, and selected-mode consumption estimates. |
+| 2026-08-16 | `scripts/metadata.py` | Allowed metadata reports immediately after generation/probe when `scores.json` is not available. |

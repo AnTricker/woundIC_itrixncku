@@ -416,7 +416,8 @@ def build_metadata_rows(
 def build_summary(run_dir: Path) -> str:
     split = read_json(run_dir / "split_summary.json")
     record = read_json(run_dir / "experiment_record.json")
-    scores = read_json(run_dir / "scores.json")
+    scores_path = run_dir / "scores.json"
+    scores = read_json(scores_path) if scores_path.exists() else {}
 
     metadata = record.get("run_metadata", {})
     smoke_counts = metadata.get("smoke_category_counts") or split.get("smoke_category_counts", {})

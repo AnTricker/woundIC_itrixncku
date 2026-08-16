@@ -24,7 +24,7 @@ Wound image VLM prompt-engineering and evaluation pipeline.
 
 ## Environment
 
-Use a virtual environment or conda environment before running anything.
+Use Python 3.10+ in a virtual environment or conda environment before running anything.
 
 ```bash
 python -m venv .venv
@@ -112,7 +112,51 @@ python -m pipeline score \
   --score-scopes smoke
 ```
 
-完整指令說明在 [docs/evaluation_pipeline.md](docs/evaluation_pipeline.md)。
+完整指令說明在 [docs/script_command_guide.md](docs/script_command_guide.md)。
+
+## Simple-only Formal Generation
+
+全資料使用 `formal` scope；`simple` 每張影像只執行一次 caption model call。
+
+Local 全量 simple generation：
+
+```bash
+python scripts/generate_local.py \
+  --run-dir runs/20260816_gemma3_4b_formal \
+  --scopes formal \
+  --modes simple \
+  --local-model gemma3:4b \
+  --workers 1
+```
+
+Gemini simple-only probe（從指定 scope 選一張影像）：
+
+```bash
+python scripts/gemini_probe.py \
+  --run-dir runs/20260816_gemma3_4b_formal \
+  --scopes formal \
+  --modes simple \
+  --seed 42 \
+  --saas-model gemini-3.1-flash-lite \
+  --saas-request-delay-sec 5 \
+  --saas-max-retries 5 \
+  --saas-backoff-base-sec 5 \
+  --saas-rpm 15 \
+  --saas-rpd 500 \
+  --saas-tpm 250000
+```
+
+`gemini_probe.py` 預設模式是 `simple`；仍可明確指定 `full` 或
+`simple,full`。`--saas-rpm`、`--saas-rpd`、`--saas-tpm` 應填入目前
+Google AI Studio 專案顯示的實際 quota。內建值只用於 planning，並非帳戶保證值。
+
+RPM/TPM 行為：
+
+- `--saas-request-delay-sec` 是實際 request pacing；15 RPM 建議設為 5 秒，保留緩衝。
+- RPM/RPD/TPM 參數供 probe projection 與安全檢查使用。
+- TPM 目前沒有 token-bucket 強制限流；以 Gemini `usageMetadata` 的 input token 推估。
+- SaaS generation 建議 `--workers 1`，避免並行 request 突破 pacing 假設。
+- Gemini quota 以 project 為單位且會隨 model/tier 改變，請查看 [Google Gemini rate limits](https://ai.google.dev/gemini-api/docs/rate-limits)。
 
 ## Prompt Modes
 
@@ -156,13 +200,26 @@ python -m pipeline score \
 ```text
 runs/dev/
 ├── manifest.jsonl
+├── split_summary.json
+├── experiment_record.json
 ├── outputs/
+├── probes/
 ├── scores.json
-├── scores.csv
-└── scores.md
+├── scores.md
+└── <run-name>_record_summary.md
 ```
 
 `runs/` 是 generated output，預設不進 git。
+
+生成 run-local metadata 報告：
+
+```bash
+python scripts/metadata.py --run-dir runs/20260816_gemma3_4b_formal
+```
+
+輸出為 `runs/20260816_gemma3_4b_formal/20260816_gemma3_4b_formal_record_summary.md`。
+可在 generation/probe 後直接執行；若尚無 `scores.json`，score 欄位會顯示
+`not recorded`。
 
 ## Practical Notes
 
@@ -188,4 +245,3 @@ PYTHONNOUSERSITE=1 python -m pipeline prepare --image-dir images --run-dir runs/
 ```
 
 這代表執行 Python 時忽略 user-site packages，避免系統或使用者層級套件污染目前 env。
-

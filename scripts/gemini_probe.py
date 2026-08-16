@@ -8,12 +8,31 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Run one-image Gemini probe.")
     parser.add_argument("--run-dir", required=True)
     parser.add_argument("--scopes", default="smoke")
+    parser.add_argument("--modes", default="simple")
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--limit", type=int, default=0)
     parser.add_argument("--saas-model", default=pipeline.DEFAULT_GEMINI_MODEL)
     parser.add_argument("--saas-request-delay-sec", type=float, default=4.0)
     parser.add_argument("--saas-max-retries", type=int, default=5)
     parser.add_argument("--saas-backoff-base-sec", type=float, default=5.0)
+    parser.add_argument(
+        "--saas-rpm",
+        type=int,
+        default=None,
+        help="Active project RPM from Google AI Studio; overrides planning default.",
+    )
+    parser.add_argument(
+        "--saas-rpd",
+        type=int,
+        default=None,
+        help="Active project RPD from Google AI Studio; overrides planning default.",
+    )
+    parser.add_argument(
+        "--saas-tpm",
+        type=int,
+        default=None,
+        help="Active project input TPM from Google AI Studio; overrides planning default.",
+    )
     parser.add_argument("--env-file", default=str(pipeline.DEFAULT_ENV_FILE))
     return parser.parse_args()
 
